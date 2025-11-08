@@ -48,14 +48,29 @@ cargo build --release
 6. "Token" セクションで "Copy" をクリックしてトークンをコピー
 7. **重要**: "Privileged Gateway Intents" セクションで以下を有効化:
    - `MESSAGE CONTENT INTENT` ✅
+   - `SERVER MEMBERS INTENT` （オプション）
 
-### 2. 環境変数の設定
+### 2. ボットをサーバーに招待
+
+1. Discord Developer Portal で左メニューから "OAuth2" → "URL Generator" を選択
+2. "SCOPES" で `bot` を選択
+3. "BOT PERMISSIONS" で最小限必要な権限を選択:
+   - `View Channels` ✅
+   - `Send Messages` ✅
+   - `Read Message History` ✅
+4. 生成されたURLをコピーしてブラウザで開く
+5. ボットを招待するサーバーを選択
+
+### 3. 環境変数の設定
 
 ```bash
 export DISCORD_TOKEN="your_bot_token_here"
 ```
 
-### 3. 実行
+**注意**: トークンは `Bot ` プレフィックス**なし**で設定してください。
+例: `export DISCORD_TOKEN="MTIzNDU2Nzg5MDEyMzQ1Njc4.ABCDEF.xyz..."`
+
+### 4. 実行
 
 ```bash
 cargo run --release
@@ -152,15 +167,53 @@ cargo clean
 cargo build
 ```
 
-### 接続エラー
+### Gateway接続エラー: "Gateway connection closed"
 
-1. トークンが正しいか確認
-2. インテントが有効化されているか確認
-3. ボットがサーバーに招待されているか確認
+このエラーが出る場合、以下を確認してください：
+
+#### 1. トークンの確認
+
+```bash
+# トークンが正しく設定されているか確認
+echo $DISCORD_TOKEN
+
+# トークンに "Bot " プレフィックスが含まれていないか確認
+# ❌ 間違い: export DISCORD_TOKEN="Bot MTIzNDU2..."
+# ✅ 正しい: export DISCORD_TOKEN="MTIzNDU2..."
+```
+
+#### 2. インテントの有効化
+
+[Discord Developer Portal](https://discord.com/developers/applications) で：
+- `MESSAGE CONTENT INTENT` が有効 ✅
+- Bot設定で "Reset Token" していないか確認
+
+#### 3. ボットの招待
+
+- ボットが少なくとも1つのサーバーに参加しているか確認
+- サーバーでボットがオンライン状態になっているか確認
+
+#### 4. 詳細ログの確認
+
+実行時のログで以下を確認：
+```
+Received Hello, heartbeat interval: 41250ms  ← OK
+Sending Identify with intents: 33281        ← インテント番号を確認
+Received: {"op":0,"t":"READY"...            ← READY イベントが来るか
+```
+
+`READY` イベントが来ない場合：
+- トークンが無効
+- インテントが未承認
+- Bot設定に問題がある可能性
 
 ### メッセージが表示されない
 
-`MESSAGE CONTENT INTENT` が有効化されているか確認してください。
+1. `MESSAGE CONTENT INTENT` が有効化されているか確認
+2. ボットに必要な権限があるか確認:
+   - `View Channels`
+   - `Read Message History`
+3. チャンネルがボットから見えるか確認（プライベートチャンネルの場合、権限が必要）
 
 ## ライセンス
 

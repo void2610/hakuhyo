@@ -17,8 +17,40 @@ use std::io;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
+/// ログを初期化（ファイルに出力）
+fn init_logger() {
+    use env_logger::Builder;
+    use log::LevelFilter;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("hakuhyo.log")
+        .expect("Failed to open log file");
+
+    Builder::new()
+        .filter_level(LevelFilter::Debug)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.args()
+            )
+        })
+        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ログ初期化
+    init_logger();
+    log::info!("Hakuhyo starting...");
+
     // Discord Bot トークンを環境変数から取得
     let token = std::env::var("DISCORD_TOKEN")
         .expect("DISCORD_TOKEN environment variable must be set");
@@ -40,9 +72,11 @@ async fn main() -> anyhow::Result<()> {
 
     // エラーがあれば表示
     if let Err(err) = result {
+        log::error!("Application error: {:?}", err);
         eprintln!("Error: {:?}", err);
     }
 
+    log::info!("Hakuhyo shutting down");
     Ok(())
 }
 
@@ -50,6 +84,8 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     token: String,
 ) -> anyhow::Result<()> {
+    log::info!("Initializing application state");
+
     // アプリケーション状態初期化
     let mut app = AppState::new();
 
@@ -59,10 +95,13 @@ async fn run_app(
     // Discord REST クライアント
     let rest_client = DiscordRestClient::new(token.clone());
 
+    log::info!("Fetching Gateway URL");
     // Gateway URL取得
     let gateway_url = rest_client.get_gateway_url().await?;
+    log::info!("Gateway URL: {}", gateway_url);
 
     // Gateway クライアント
+    log::info!("Connecting to Gateway");
     let gateway_client = GatewayClient::connect(token, gateway_url).await?;
 
     // Gateway イベントハンドラ（別タスク）
@@ -86,7 +125,7 @@ async fn run_app(
             .await;
 
         if let Err(e) = result {
-            eprintln!("Gateway error: {:?}", e);
+            log::error!("Gateway error: {:?}", e);
         }
     });
 

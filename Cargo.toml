@@ -23,5 +23,9 @@ serde_json = "1.0"
 # エラーハンドリング
 anyhow = "1.0"
 
+# ロギング
+log = "0.4"
+env_logger = "0.11"
+
 # ユーティリティ
 chrono = "0.4"

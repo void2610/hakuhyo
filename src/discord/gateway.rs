@@ -25,14 +25,14 @@ impl GatewayClient {
         // WebSocket URL を構築
         let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
 
-        eprintln!("Connecting to Gateway: {}", ws_url);
+        log::info!("Connecting to Gateway: {}", ws_url);
 
         // WebSocket接続
         let (ws_stream, _) = connect_async(&ws_url)
             .await
             .context("Failed to connect to Gateway")?;
 
-        eprintln!("Connected to Gateway");
+        log::info!("Connected to Gateway");
 
         // インテント設定（ギルド、メッセージ、DM、メッセージ内容）
         let intents = intents::GUILDS
@@ -57,12 +57,12 @@ impl GatewayClient {
         // Hello メッセージを受信してハートビート間隔を取得
         let heartbeat_interval = self.wait_for_hello().await?;
 
-        eprintln!("Received Hello, heartbeat interval: {}ms", heartbeat_interval);
+        log::info!("Received Hello, heartbeat interval: {}ms", heartbeat_interval);
 
         // Identify を送信
         self.send_identify().await?;
 
-        eprintln!("Sent Identify");
+        log::info!("Sent Identify");
 
         // ハートビートタスクを開始
         let last_seq_clone = self.last_sequence.clone();
@@ -79,16 +79,17 @@ impl GatewayClient {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(WsMessage::Text(text)) => {
+                    log::debug!("Received: {}", text);
                     if let Some(event) = Self::handle_message(&text, &mut session_id, &last_seq_ref).await {
                         event_handler(event);
                     }
                 }
-                Ok(WsMessage::Close(_)) => {
-                    eprintln!("Gateway connection closed");
+                Ok(WsMessage::Close(frame)) => {
+                    log::warn!("Gateway connection closed: {:?}", frame);
                     break;
                 }
                 Err(e) => {
-                    eprintln!("WebSocket error: {}", e);
+                    log::error!("WebSocket error: {}", e);
                     break;
                 }
                 _ => {}
@@ -121,10 +122,17 @@ impl GatewayClient {
 
     /// Identify を送信
     async fn send_identify(&mut self) -> Result<()> {
+        // トークンに "Bot " プレフィックスがない場合は追加
+        let token = if self.token.starts_with("Bot ") {
+            self.token.clone()
+        } else {
+            format!("Bot {}", self.token)
+        };
+
         let identify = GatewayPayload {
             op: opcodes::IDENTIFY,
             d: Some(json!({
-                "token": self.token,
+                "token": token,
                 "intents": self.intents,
                 "properties": {
                     "os": std::env::consts::OS,
@@ -137,6 +145,8 @@ impl GatewayClient {
         };
 
         let payload_text = serde_json::to_string(&identify)?;
+        log::info!("Sending Identify with intents: {}", self.intents);
+        log::debug!("Identify payload: {}", payload_text);
         self.ws_stream
             .send(WsMessage::Text(payload_text))
             .await
@@ -169,7 +179,7 @@ impl GatewayClient {
 
             if let Ok(payload_text) = serde_json::to_string(&heartbeat) {
                 if write.send(WsMessage::Text(payload_text)).await.is_err() {
-                    eprintln!("Failed to send heartbeat");
+                    log::error!("Failed to send heartbeat");
                     break;
                 }
             }
@@ -198,7 +208,7 @@ impl GatewayClient {
                     "READY" => {
                         let ready_data: ReadyData = serde_json::from_value(data).ok()?;
                         *session_id = Some(ready_data.session_id.clone());
-                        eprintln!("Gateway Ready! User: {}", ready_data.user.username);
+                        log::info!("Gateway Ready! User: {}", ready_data.user.username);
                         Some(GatewayEvent::Ready(ready_data))
                     }
                     "MESSAGE_CREATE" => {

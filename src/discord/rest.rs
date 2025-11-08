@@ -80,10 +80,17 @@ impl DiscordRestClient {
         // レート制限対策: 最小間隔を設ける
         tokio::time::sleep(Duration::from_millis(20)).await;
 
+        // トークンに "Bot " プレフィックスがない場合は追加
+        let auth_header = if self.token.starts_with("Bot ") {
+            self.token.clone()
+        } else {
+            format!("Bot {}", self.token)
+        };
+
         let response = self
             .client
             .get(url)
-            .header("Authorization", format!("Bot {}", self.token))
+            .header("Authorization", auth_header)
             .header("User-Agent", "Hakuhyo/1.0")
             .send()
             .await
@@ -115,10 +122,17 @@ impl DiscordRestClient {
         // レート制限対策: 最小間隔を設ける
         tokio::time::sleep(Duration::from_millis(20)).await;
 
+        // トークンに "Bot " プレフィックスがない場合は追加
+        let auth_header = if self.token.starts_with("Bot ") {
+            self.token.clone()
+        } else {
+            format!("Bot {}", self.token)
+        };
+
         let response = self
             .client
             .post(url)
-            .header("Authorization", format!("Bot {}", self.token))
+            .header("Authorization", auth_header)
             .header("User-Agent", "Hakuhyo/1.0")
             .json(payload)
             .send()
