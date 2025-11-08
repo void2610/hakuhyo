@@ -14,6 +14,8 @@ pub enum AppEvent {
     // Discord イベント（Gateway）
     /// Gateway接続完了
     GatewayReady(ReadyData),
+    /// ギルド作成（チャンネル情報取得）
+    GuildCreate(Vec<Channel>),
     /// 新規メッセージ
     MessageCreate(Message),
     /// メッセージ更新

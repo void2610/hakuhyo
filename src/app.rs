@@ -74,6 +74,29 @@ impl AppState {
                 Command::LoadChannels
             }
 
+            AppEvent::GuildCreate(channels) => {
+                // ギルドのチャンネル情報を追加
+                for channel in channels {
+                    self.discord.channels.insert(channel.id.clone(), channel);
+                }
+
+                // 最初のチャンネルを選択
+                if self.ui.selected_channel.is_none() {
+                    let first_channel_id = self
+                        .get_channel_list()
+                        .first()
+                        .map(|ch| ch.id.clone());
+
+                    if let Some(channel_id) = first_channel_id {
+                        self.ui.selected_channel = Some(channel_id.clone());
+                        self.ui.channel_list_state.select(Some(0));
+                        return Command::LoadMessages(channel_id);
+                    }
+                }
+
+                Command::None
+            }
+
             AppEvent::MessageCreate(message) => {
                 // メッセージを追加
                 self.discord

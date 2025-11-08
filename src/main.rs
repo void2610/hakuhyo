@@ -113,6 +113,7 @@ async fn run_app(
                 tokio::spawn(async move {
                     let app_event = match gateway_event {
                         GatewayEvent::Ready(data) => AppEvent::GatewayReady(data),
+                        GatewayEvent::GuildCreate(channels) => AppEvent::GuildCreate(channels),
                         GatewayEvent::MessageCreate(msg) => AppEvent::MessageCreate(msg),
                         GatewayEvent::MessageUpdate(msg) => AppEvent::MessageUpdate(msg),
                         GatewayEvent::MessageDelete { id, channel_id } => {

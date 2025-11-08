@@ -209,6 +209,23 @@ impl GatewayClient {
                         log::info!("Gateway Ready! User: {}", ready_data.user.username);
                         Some(GatewayEvent::Ready(ready_data))
                     }
+                    "GUILD_CREATE" => {
+                        // チャンネル情報を抽出
+                        let channels = data.get("channels")?.as_array()?;
+                        let mut channel_list = Vec::new();
+
+                        for channel_data in channels {
+                            if let Ok(channel) = serde_json::from_value::<models::Channel>(channel_data.clone()) {
+                                // テキストチャンネル（type 0）のみ追加
+                                if channel.channel_type == 0 {
+                                    channel_list.push(channel);
+                                }
+                            }
+                        }
+
+                        log::info!("GUILD_CREATE: loaded {} text channels", channel_list.len());
+                        Some(GatewayEvent::GuildCreate(channel_list))
+                    }
                     "MESSAGE_CREATE" => {
                         let message: models::Message = serde_json::from_value(data).ok()?;
                         Some(GatewayEvent::MessageCreate(message))
@@ -242,6 +259,7 @@ impl GatewayClient {
 #[derive(Debug, Clone)]
 pub enum GatewayEvent {
     Ready(ReadyData),
+    GuildCreate(Vec<models::Channel>),
     MessageCreate(models::Message),
     MessageUpdate(models::Message),
     MessageDelete { id: String, channel_id: String },
