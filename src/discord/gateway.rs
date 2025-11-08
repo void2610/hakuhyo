@@ -129,9 +129,10 @@ impl GatewayClient {
             format!("Bot {}", self.token)
         };
 
-        let identify = GatewayPayload {
-            op: opcodes::IDENTIFY,
-            d: Some(json!({
+        // Identify ペイロードを直接構築（s と t フィールドを含めない）
+        let identify_payload = json!({
+            "op": opcodes::IDENTIFY,
+            "d": {
                 "token": token,
                 "intents": self.intents,
                 "properties": {
@@ -139,12 +140,10 @@ impl GatewayClient {
                     "browser": "hakuhyo",
                     "device": "hakuhyo"
                 }
-            })),
-            s: None,
-            t: None,
-        };
+            }
+        });
 
-        let payload_text = serde_json::to_string(&identify)?;
+        let payload_text = serde_json::to_string(&identify_payload)?;
         log::info!("Sending Identify with intents: {}", self.intents);
         log::debug!("Identify payload: {}", payload_text);
         self.ws_stream
@@ -170,12 +169,11 @@ impl GatewayClient {
             ticker.tick().await;
 
             let seq = *last_sequence.read().await;
-            let heartbeat = GatewayPayload {
-                op: opcodes::HEARTBEAT,
-                d: seq.map(|s| json!(s)),
-                s: None,
-                t: None,
-            };
+            // ハートビートペイロードを直接構築（s と t フィールドを含めない）
+            let heartbeat = json!({
+                "op": opcodes::HEARTBEAT,
+                "d": seq
+            });
 
             if let Ok(payload_text) = serde_json::to_string(&heartbeat) {
                 if write.send(WsMessage::Text(payload_text)).await.is_err() {
