@@ -10,6 +10,42 @@ pub struct User {
     pub avatar: Option<String>,
 }
 
+/// 添付ファイル情報
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Attachment {
+    pub id: String,
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl Attachment {
+    /// 添付ファイルの表示用テキストを取得
+    pub fn display_text(&self) -> String {
+        if let Some(content_type) = &self.content_type {
+            if content_type.starts_with("image/") {
+                format!("[Image: {}]", self.filename)
+            } else if content_type.starts_with("video/") {
+                format!("[Video: {}]", self.filename)
+            } else if content_type.starts_with("audio/") {
+                format!("[Audio: {}]", self.filename)
+            } else {
+                format!("[File: {}]", self.filename)
+            }
+        } else {
+            format!("[File: {}]", self.filename)
+        }
+    }
+}
+
 /// メッセージ情報
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
@@ -20,6 +56,8 @@ pub struct Message {
     pub timestamp: String,
     #[serde(default)]
     pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 /// チャンネル情報

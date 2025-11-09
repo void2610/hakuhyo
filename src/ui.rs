@@ -107,22 +107,35 @@ fn render_message_list(frame: &mut Frame, app: &AppState, area: ratatui::layout:
             // タイムスタンプを整形
             let time = format_timestamp(&msg.timestamp);
 
-            // メッセージを整形
-            let content = vec![
-                Line::from(vec![
-                    Span::styled(
-                        format!("[{}] ", time),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("{}: ", msg.author.username),
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(&msg.content),
-                ]),
+            // メッセージを1行で構築
+            let mut spans = vec![
+                Span::styled(
+                    format!("[{}] ", time),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{}: ", msg.author.username),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
             ];
 
-            ListItem::new(content)
+            // テキストコンテンツを追加
+            if !msg.content.is_empty() {
+                spans.push(Span::raw(&msg.content));
+            }
+
+            // 添付ファイル情報を同じ行に追加
+            for (i, attachment) in msg.attachments.iter().enumerate() {
+                if i > 0 || !msg.content.is_empty() {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(
+                    attachment.display_text(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::ITALIC),
+                ));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
