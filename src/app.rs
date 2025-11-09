@@ -157,13 +157,8 @@ impl AppState {
             }
 
             AppEvent::MessageSent(message) => {
-                // 送信したメッセージを追加（Gateway で MESSAGE_CREATE が来るので重複する可能性あり）
-                self.discord
-                    .messages
-                    .entry(message.channel_id.clone())
-                    .or_default()
-                    .push(message);
-                Command::None
+                // メッセージ送信後にメッセージリストを再読み込みして最新の状態を取得
+                Command::LoadMessages(message.channel_id)
             }
 
             // UI イベント
