@@ -190,14 +190,8 @@ impl AppState {
                     self.ui.input_mode = InputMode::Editing;
                     Command::None
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.select_previous_channel();
-                    Command::None
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.select_next_channel();
-                    Command::None
-                }
+                KeyCode::Up | KeyCode::Char('k') => self.select_previous_channel(),
+                KeyCode::Down | KeyCode::Char('j') => self.select_next_channel(),
                 KeyCode::Enter => {
                     // チャンネル選択確定
                     if let Some(channel_id) = &self.ui.selected_channel {
@@ -241,7 +235,7 @@ impl AppState {
     }
 
     /// 前のチャンネルを選択
-    fn select_previous_channel(&mut self) {
+    fn select_previous_channel(&mut self) -> Command {
         let channel_ids: Vec<String> = self
             .get_channel_list()
             .iter()
@@ -249,7 +243,7 @@ impl AppState {
             .collect();
 
         if channel_ids.is_empty() {
-            return;
+            return Command::None;
         }
 
         let current_index = self.ui.channel_list_state.selected().unwrap_or(0);
@@ -261,10 +255,13 @@ impl AppState {
 
         self.ui.channel_list_state.select(Some(new_index));
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
+
+        // チャンネル切り替え時に自動的にメッセージを読み込む
+        Command::LoadMessages(channel_ids[new_index].clone())
     }
 
     /// 次のチャンネルを選択
-    fn select_next_channel(&mut self) {
+    fn select_next_channel(&mut self) -> Command {
         let channel_ids: Vec<String> = self
             .get_channel_list()
             .iter()
@@ -272,7 +269,7 @@ impl AppState {
             .collect();
 
         if channel_ids.is_empty() {
-            return;
+            return Command::None;
         }
 
         let current_index = self.ui.channel_list_state.selected().unwrap_or(0);
@@ -284,6 +281,9 @@ impl AppState {
 
         self.ui.channel_list_state.select(Some(new_index));
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
+
+        // チャンネル切り替え時に自動的にメッセージを読み込む
+        Command::LoadMessages(channel_ids[new_index].clone())
     }
 
     /// チャンネルリストを取得（ソート済み）
