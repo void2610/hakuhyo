@@ -85,7 +85,7 @@ fn render_channel_list(frame: &mut Frame, app: &AppState, area: ratatui::layout:
 
 /// メッセージリストを描画
 fn render_message_list(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
-    let messages = app.get_current_messages();
+    let mut messages = app.get_current_messages();
 
     if messages.is_empty() {
         let placeholder = Paragraph::new("No messages")
@@ -100,6 +100,9 @@ fn render_message_list(frame: &mut Frame, app: &AppState, area: ratatui::layout:
         frame.render_widget(placeholder, area);
         return;
     }
+
+    // メッセージを逆順にして、古い順にする
+    messages.reverse();
 
     let items: Vec<ListItem> = messages
         .iter()
@@ -156,7 +159,12 @@ fn render_message_list(frame: &mut Frame, app: &AppState, area: ratatui::layout:
             .border_style(Style::default().fg(Color::Cyan)),
     );
 
-    frame.render_widget(list, area);
+    // メッセージリストの状態を使って、最後のメッセージを表示
+    let mut state = app.ui.message_list_state.clone();
+    let last_index = messages.len().saturating_sub(1);
+    state.select(Some(last_index));
+
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 /// 入力エリアを描画
@@ -218,10 +226,14 @@ fn render_status_bar(frame: &mut Frame, app: &AppState, area: ratatui::layout::R
     frame.render_widget(paragraph, area);
 }
 
-/// タイムスタンプを "HH:MM" 形式に整形
+/// タイムスタンプを "HH:MM" 形式に整形（日本時間）
 fn format_timestamp(timestamp: &str) -> String {
     if let Ok(dt) = timestamp.parse::<DateTime<Utc>>() {
-        dt.format("%H:%M").to_string()
+        // UTC+9（日本時間）に変換
+        use chrono::offset::FixedOffset;
+        let jst = FixedOffset::east_opt(9 * 3600).unwrap();
+        let dt_jst = dt.with_timezone(&jst);
+        dt_jst.format("%H:%M").to_string()
     } else {
         "??:??".to_string()
     }
