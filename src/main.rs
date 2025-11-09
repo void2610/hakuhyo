@@ -47,11 +47,9 @@ fn init_logger() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ログ初期化
     init_logger();
     log::info!("Hakuhyo starting...");
 
-    // Discord Bot トークンを環境変数から取得
     let token = std::env::var("DISCORD_TOKEN")
         .expect("DISCORD_TOKEN environment variable must be set");
 
@@ -62,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // アプリケーション実行
+    // アプリケーションを実行し、終了するまで待機
     let result = run_app(&mut terminal, token).await;
 
     // ターミナル復元
@@ -70,7 +68,6 @@ async fn main() -> anyhow::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    // エラーがあれば表示
     if let Err(err) = result {
         log::error!("Application error: {:?}", err);
         eprintln!("Error: {:?}", err);
@@ -86,25 +83,15 @@ async fn run_app(
 ) -> anyhow::Result<()> {
     log::info!("Initializing application state");
 
-    // アプリケーション状態初期化
     let mut app = AppState::new();
-
-    // イベントチャンネル
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
-
-    // Discord REST クライアント
     let rest_client = DiscordRestClient::new(token.clone());
 
-    log::info!("Fetching Gateway URL");
-    // Gateway URL取得
     let gateway_url = rest_client.get_gateway_url().await?;
     log::info!("Gateway URL: {}", gateway_url);
-
-    // Gateway クライアント
-    log::info!("Connecting to Gateway");
     let gateway_client = GatewayClient::connect(token, gateway_url).await?;
 
-    // Gateway イベントハンドラ（別タスク）
+    // Gateway イベントハンドラ
     let gateway_event_tx = event_tx.clone();
     tokio::spawn(async move {
         let result = gateway_client
@@ -130,7 +117,7 @@ async fn run_app(
         }
     });
 
-    // UI イベントハンドラ（別タスク）
+    // UI イベントハンドラ
     let ui_event_tx = event_tx.clone();
     tokio::spawn(async move {
         let mut reader = EventStream::new();
@@ -157,7 +144,7 @@ async fn run_app(
         }
     });
 
-    // 描画タイマー（別タスク）
+    // 描画タイマー
     let tick_tx = event_tx.clone();
     tokio::spawn(async move {
         let mut tick_interval = interval(Duration::from_millis(100));
@@ -185,11 +172,10 @@ async fn run_app(
             let command = app.update(event);
 
             // コマンド実行
+            let rest = rest_client.clone();
+            let tx = event_tx.clone();
             match command {
                 Command::LoadChannels => {
-                    // チャンネル一覧を取得
-                    let rest = rest_client.clone();
-                    let tx = event_tx.clone();
                     tokio::spawn(async move {
                         // まずギルドを取得
                         if let Ok(guilds) = rest.get_guilds().await {
@@ -207,9 +193,6 @@ async fn run_app(
                     });
                 }
                 Command::LoadMessages(channel_id) => {
-                    // メッセージ一覧を取得
-                    let rest = rest_client.clone();
-                    let tx = event_tx.clone();
                     tokio::spawn(async move {
                         if let Ok(messages) = rest.get_messages(&channel_id, 50).await {
                             let _ = tx
@@ -225,9 +208,6 @@ async fn run_app(
                     channel_id,
                     content,
                 } => {
-                    // メッセージを送信
-                    let rest = rest_client.clone();
-                    let tx = event_tx.clone();
                     tokio::spawn(async move {
                         if let Ok(message) = rest.send_message(&channel_id, &content).await {
                             let _ = tx.send(AppEvent::MessageSent(message)).await;
