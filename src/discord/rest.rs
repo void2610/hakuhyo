@@ -70,7 +70,8 @@ impl DiscordRestClient {
 
     /// Gateway URLを取得
     pub async fn get_gateway_url(&self) -> Result<String> {
-        let url = format!("{}/gateway/bot", API_BASE);
+        // ユーザーアカウント認証対応: /gateway エンドポイントを使用
+        let url = format!("{}/gateway", API_BASE);
         let response: GatewayResponse = self.get(&url).await?;
         Ok(response.url)
     }
@@ -80,12 +81,8 @@ impl DiscordRestClient {
         // レート制限対策: 最小間隔を設ける
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // トークンに "Bot " プレフィックスがない場合は追加
-        let auth_header = if self.token.starts_with("Bot ") {
-            self.token.clone()
-        } else {
-            format!("Bot {}", self.token)
-        };
+        // トークンをそのまま使用（ユーザーアカウント認証対応）
+        let auth_header = self.token.clone();
 
         let response = self
             .client
@@ -122,12 +119,8 @@ impl DiscordRestClient {
         // レート制限対策: 最小間隔を設ける
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // トークンに "Bot " プレフィックスがない場合は追加
-        let auth_header = if self.token.starts_with("Bot ") {
-            self.token.clone()
-        } else {
-            format!("Bot {}", self.token)
-        };
+        // トークンをそのまま使用（ユーザーアカウント認証対応）
+        let auth_header = self.token.clone();
 
         let response = self
             .client

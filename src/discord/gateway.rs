@@ -122,29 +122,53 @@ impl GatewayClient {
 
     /// Identify を送信
     async fn send_identify(&mut self) -> Result<()> {
-        // トークンに "Bot " プレフィックスがない場合は追加
-        let token = if self.token.starts_with("Bot ") {
-            self.token.clone()
-        } else {
-            format!("Bot {}", self.token)
-        };
+        // トークンをそのまま使用（ユーザーアカウント認証対応）
+        let token = self.token.clone();
 
-        // Identify ペイロードを直接構築（s と t フィールドを含めない）
+        // ユーザーアカウント認証用の詳細なproperties
+        // 実際のDiscordクライアントを模倣
         let identify_payload = json!({
             "op": opcodes::IDENTIFY,
             "d": {
                 "token": token,
-                "intents": self.intents,
+                "capabilities": 16381,  // ユーザークライアントの機能フラグ
                 "properties": {
-                    "os": std::env::consts::OS,
-                    "browser": "hakuhyo",
-                    "device": "hakuhyo"
+                    "os": "Mac OS X",
+                    "browser": "Chrome",
+                    "device": "",
+                    "system_locale": "ja-JP",
+                    "browser_user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "browser_version": "120.0.0.0",
+                    "os_version": "10.15.7",
+                    "referrer": "",
+                    "referring_domain": "",
+                    "referrer_current": "",
+                    "referring_domain_current": "",
+                    "release_channel": "stable",
+                    "client_build_number": 261053,
+                    "client_event_source": serde_json::Value::Null
+                },
+                "presence": {
+                    "status": "online",
+                    "since": 0,
+                    "activities": [],
+                    "afk": false
+                },
+                "compress": false,
+                "client_state": {
+                    "guild_versions": {},
+                    "highest_last_message_id": "0",
+                    "read_state_version": 0,
+                    "user_guild_settings_version": -1,
+                    "user_settings_version": -1,
+                    "private_channels_version": "0",
+                    "api_code_version": 0
                 }
             }
         });
 
         let payload_text = serde_json::to_string(&identify_payload)?;
-        log::info!("Sending Identify with intents: {}", self.intents);
+        log::info!("Sending Identify for user account");
         log::debug!("Identify payload: {}", payload_text);
         self.ws_stream
             .send(WsMessage::Text(payload_text))
