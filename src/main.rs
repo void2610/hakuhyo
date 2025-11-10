@@ -2,10 +2,11 @@ mod app;
 mod auth;
 mod discord;
 mod events;
+mod token_store;
 mod ui;
 
 use app::{AppState, Command};
-use auth::authenticate_with_qr;
+use auth::get_or_authenticate_token;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
@@ -52,18 +53,8 @@ async fn main() -> anyhow::Result<()> {
     init_logger();
     log::info!("Hakuhyo starting...");
 
-    // トークン取得（環境変数またはQRコード認証）
-    let token = match std::env::var("DISCORD_TOKEN") {
-        Ok(token) => {
-            log::info!("Using token from DISCORD_TOKEN environment variable");
-            token
-        }
-        Err(_) => {
-            log::info!("DISCORD_TOKEN not found, starting QR code authentication");
-            // QRコード認証を実行（ターミナルは通常モード）
-            authenticate_with_qr().await?
-        }
-    };
+    // トークン取得（キーチェーン → 環境変数 → QRコード認証）
+    let token = get_or_authenticate_token().await?;
 
     // ターミナル初期化（認証完了後）
     enable_raw_mode()?;

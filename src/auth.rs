@@ -8,6 +8,8 @@ use serde_json::json;
 use sha2::Sha256;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use crate::token_store;
+
 const REMOTE_AUTH_URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -262,6 +264,94 @@ pub async fn authenticate_with_qr() -> Result<String> {
     if token.is_empty() {
         anyhow::bail!("Failed to get token");
     }
+
+    Ok(token)
+}
+
+/// 保存されたトークンを検証
+///
+/// Discord APIの `/users/@me` エンドポイントを使用してトークンの有効性を確認
+async fn validate_stored_token(token: &str) -> bool {
+    log::debug!("Validating stored token...");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://discord.com/api/v10/users/@me")
+        .header("Authorization", token)
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) if resp.status().is_success() => {
+            log::info!("✓ Stored token is valid");
+            true
+        }
+        Ok(resp) => {
+            log::warn!("✗ Stored token is invalid: {}", resp.status());
+            false
+        }
+        Err(e) => {
+            log::error!("Failed to validate token: {}", e);
+            false
+        }
+    }
+}
+
+/// トークンを取得（キーチェーン → 環境変数 → QRコード認証）
+///
+/// # 認証フロー
+/// 1. システムキーチェーンから読み込み → 検証
+/// 2. 環境変数 `DISCORD_TOKEN` をチェック → 検証 → キーチェーンに保存
+/// 3. QRコード認証を実行 → キーチェーンに保存
+///
+/// # エラー
+/// - 全ての認証方法が失敗した場合
+pub async fn get_or_authenticate_token() -> Result<String> {
+    // 1. キーチェーンから取得を試行
+    if let Ok(token) = tokio::task::spawn_blocking(|| token_store::load_token()).await? {
+        log::info!("Token found in keyring, validating...");
+        if validate_stored_token(&token).await {
+            return Ok(token);
+        } else {
+            log::warn!("Stored token is invalid, will re-authenticate");
+            // 無効なトークンは削除
+            let _ = tokio::task::spawn_blocking(|| token_store::delete_token()).await;
+        }
+    } else {
+        log::debug!("No token found in keyring");
+    }
+
+    // 2. 環境変数をチェック
+    if let Ok(token) = std::env::var("DISCORD_TOKEN") {
+        log::info!("Using token from DISCORD_TOKEN environment variable");
+        if validate_stored_token(&token).await {
+            // 有効な環境変数トークンをキーチェーンに保存
+            let token_clone = token.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = token_store::save_token(&token_clone) {
+                    log::warn!("Failed to save token to keyring: {}", e);
+                }
+            })
+            .await?;
+            return Ok(token);
+        } else {
+            log::warn!("Environment variable token is invalid");
+        }
+    }
+
+    // 3. QRコード認証を実行
+    log::info!("Starting QR code authentication...");
+    let token = authenticate_with_qr().await?;
+
+    // 4. 取得したトークンをキーチェーンに保存
+    let token_clone = token.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = token_store::save_token(&token_clone) {
+            log::error!("Failed to save token to keyring: {}", e);
+        }
+    })
+    .await?;
 
     Ok(token)
 }
