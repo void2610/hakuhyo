@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 /// TUIを描画
-pub fn render(frame: &mut Frame, app: &AppState) {
+pub fn render(frame: &mut Frame, app: &mut AppState) {
     // メインレイアウト: 左サイドバー | 右コンテンツ
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -43,7 +43,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
 }
 
 /// チャンネルリストを描画
-fn render_channel_list(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
+fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
     let channels = app.get_channel_list();
 
     let items: Vec<ListItem> = channels
@@ -79,12 +79,11 @@ fn render_channel_list(frame: &mut Frame, app: &AppState, area: ratatui::layout:
         )
         .highlight_symbol(">> ");
 
-    let mut state = app.ui.channel_list_state.clone();
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, area, &mut app.ui.channel_list_state);
 }
 
 /// メッセージリストを描画
-fn render_message_list(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
+fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
     let mut messages = app.get_current_messages();
 
     if messages.is_empty() {
@@ -160,15 +159,15 @@ fn render_message_list(frame: &mut Frame, app: &AppState, area: ratatui::layout:
     );
 
     // メッセージリストの状態を使って、最後のメッセージを表示
-    let mut state = app.ui.message_list_state.clone();
     let last_index = messages.len().saturating_sub(1);
+    let mut state = app.ui.message_list_state.clone();
     state.select(Some(last_index));
 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
 /// 入力エリアを描画
-fn render_input_area(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
+fn render_input_area(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
     let style = match app.ui.input_mode {
         InputMode::Editing => Style::default().fg(Color::Yellow),
         InputMode::Normal => Style::default(),
@@ -200,7 +199,7 @@ fn render_input_area(frame: &mut Frame, app: &AppState, area: ratatui::layout::R
 }
 
 /// ステータスバーを描画
-fn render_status_bar(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
+fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
     let status = if app.discord.connected {
         Span::styled(
             " Connected ",

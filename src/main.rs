@@ -171,7 +171,7 @@ async fn run_app(
     // メインループ
     loop {
         // UI描画
-        terminal.draw(|f| ui::render(f, &app))?;
+        terminal.draw(|f| ui::render(f, &mut app))?;
 
         // イベント処理
         if let Some(event) = event_rx.recv().await {
