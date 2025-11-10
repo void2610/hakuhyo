@@ -42,16 +42,44 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
     render_status_bar(frame, app, content_chunks[2]);
 }
 
-/// チャンネルリストを描画
+/// チャンネルリストを描画（お気に入りまたは検索結果）
 fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
-    let channels = app.get_channel_list();
+    // 検索モードまたは通常モード（お気に入り）で表示を切り替え
+    let (channels, title) = if app.ui.search_mode {
+        // 検索モード: 検索結果を表示
+        let results = app.search_channels(&app.ui.search_buffer);
+        (results, format!("Search: {}", app.ui.search_buffer))
+    } else {
+        // 通常モード: お気に入りを表示
+        let favorites = app.get_favorite_channels();
+        (favorites, "Favorites (Press / to search)".to_string())
+    };
 
     let items: Vec<ListItem> = channels
         .iter()
         .map(|channel| {
             let prefix = channel.type_prefix();
             let name = channel.display_name();
-            let content = format!("{}{}", prefix, name);
+
+            // ギルド名を取得
+            let guild_name = if let Some(guild_id) = &channel.guild_id {
+                if let Some(guild) = app.discord.guilds.get(guild_id) {
+                    format!("[{}] ", guild.name)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            // お気に入りマークを追加
+            let favorite_mark = if app.ui.favorites.contains(&channel.id) {
+                "⭐ "
+            } else {
+                ""
+            };
+
+            let content = format!("{}{}{}{}", favorite_mark, guild_name, prefix, name);
 
             let style = if Some(&channel.id) == app.ui.selected_channel.as_ref() {
                 Style::default()
@@ -69,7 +97,7 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Channels")
+                .title(title)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .highlight_style(
@@ -212,11 +240,16 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: ratatui::layou
         )
     };
 
-    let help = match app.ui.input_mode {
-        InputMode::Normal => {
-            Span::raw(" q: Quit | i: Edit | ↑/k: Up | ↓/j: Down | Enter: Select ")
+    let help = if app.ui.search_mode {
+        // 検索モード
+        Span::raw(" Esc: Exit search | ↑/↓: Navigate | Enter: Select ")
+    } else {
+        match app.ui.input_mode {
+            InputMode::Normal => {
+                Span::raw(" q: Quit | i: Edit | /: Search | f: Favorite | ↑/k: Up | ↓/j: Down ")
+            }
+            InputMode::Editing => Span::raw(" Esc: Normal mode | Enter: Send message "),
         }
-        InputMode::Editing => Span::raw(" Esc: Normal mode | Enter: Send message "),
     };
 
     let status_line = Line::from(vec![status, help]);

@@ -1,5 +1,6 @@
 mod app;
 mod auth;
+mod config;
 mod discord;
 mod events;
 mod token_store;
@@ -87,6 +88,14 @@ async fn run_app(
     log::info!("Initializing application state");
 
     let mut app = AppState::new();
+
+    // 設定ファイルを読み込み
+    if let Ok(config) = config::load_config() {
+        app.load_favorites(config.favorites);
+    } else {
+        log::warn!("Failed to load config, using default");
+    }
+
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let rest_client = DiscordRestClient::new(token.clone());
 
@@ -183,6 +192,10 @@ async fn run_app(
                         // まずギルドを取得
                         if let Ok(guilds) = rest.get_guilds().await {
                             for guild in guilds {
+                                // ギルド情報を送信
+                                let _ = tx.send(AppEvent::GuildLoaded(guild.clone())).await;
+
+                                // ギルドのチャンネルを取得
                                 if let Ok(channels) = rest.get_guild_channels(&guild.id).await {
                                     let _ = tx.send(AppEvent::ChannelsLoaded(channels)).await;
                                 }
@@ -220,6 +233,15 @@ async fn run_app(
                 Command::None => {}
             }
         }
+    }
+
+    // 終了時に設定を保存
+    log::info!("Saving configuration...");
+    let config_to_save = config::Config {
+        favorites: app.get_favorites().clone(),
+    };
+    if let Err(e) = config::save_config(&config_to_save) {
+        log::error!("Failed to save config: {}", e);
     }
 
     Ok(())

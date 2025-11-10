@@ -1,8 +1,8 @@
-use crate::discord::{Channel, Message, User};
+use crate::discord::{Channel, Guild, Message, User};
 use crate::events::AppEvent;
 use crossterm::event::KeyCode;
 use ratatui::widgets::ListState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// アプリケーション全体の状態
 pub struct AppState {
@@ -12,6 +12,7 @@ pub struct AppState {
 
 /// Discord関連の状態
 pub struct DiscordState {
+    pub guilds: HashMap<String, Guild>,          // guild_id -> guild
     pub channels: HashMap<String, Channel>,
     pub messages: HashMap<String, Vec<Message>>, // channel_id -> messages
     pub current_user: Option<User>,
@@ -26,6 +27,10 @@ pub struct UiState {
     pub message_list_state: ListState,
     pub input_mode: InputMode,
     pub input_buffer: String,
+    // 検索・お気に入り関連
+    pub favorites: HashSet<String>,     // お気に入りチャンネルID
+    pub search_mode: bool,               // 検索モードフラグ
+    pub search_buffer: String,           // 検索クエリ
 }
 
 /// 入力モード
@@ -49,6 +54,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             discord: DiscordState {
+                guilds: HashMap::new(),
                 channels: HashMap::new(),
                 messages: HashMap::new(),
                 current_user: None,
@@ -60,8 +66,22 @@ impl AppState {
                 message_list_state: ListState::default(),
                 input_mode: InputMode::Normal,
                 input_buffer: String::new(),
+                favorites: HashSet::new(),
+                search_mode: false,
+                search_buffer: String::new(),
             },
         }
+    }
+
+    /// お気に入り設定を読み込み
+    pub fn load_favorites(&mut self, favorites: HashSet<String>) {
+        self.ui.favorites = favorites;
+        log::debug!("Loaded {} favorites", self.ui.favorites.len());
+    }
+
+    /// お気に入り設定を取得
+    pub fn get_favorites(&self) -> &HashSet<String> {
+        &self.ui.favorites
     }
 
     /// イベントを処理して状態を更新
@@ -80,12 +100,16 @@ impl AppState {
                     self.discord.channels.insert(channel.id.clone(), channel);
                 }
 
-                // 最初のチャンネルを選択
+                // 最初のチャンネルを選択（お気に入りを優先）
                 if self.ui.selected_channel.is_none() {
-                    let first_channel_id = self
-                        .get_channel_list()
-                        .first()
-                        .map(|ch| ch.id.clone());
+                    let first_channel_id = {
+                        let favorites = self.get_favorite_channels();
+                        if let Some(ch) = favorites.first() {
+                            Some(ch.id.clone())
+                        } else {
+                            self.get_channel_list().first().map(|ch| ch.id.clone())
+                        }
+                    };
 
                     if let Some(channel_id) = first_channel_id {
                         self.ui.selected_channel = Some(channel_id.clone());
@@ -94,6 +118,12 @@ impl AppState {
                     }
                 }
 
+                Command::None
+            }
+
+            AppEvent::GuildLoaded(guild) => {
+                // ギルド情報を保存
+                self.discord.guilds.insert(guild.id.clone(), guild);
                 Command::None
             }
 
@@ -131,12 +161,16 @@ impl AppState {
                     self.discord.channels.insert(channel.id.clone(), channel);
                 }
 
-                // 最初のチャンネルを選択
+                // 最初のチャンネルを選択（お気に入りを優先）
                 if self.ui.selected_channel.is_none() {
-                    let first_channel_id = self
-                        .get_channel_list()
-                        .first()
-                        .map(|ch| ch.id.clone());
+                    let first_channel_id = {
+                        let favorites = self.get_favorite_channels();
+                        if let Some(ch) = favorites.first() {
+                            Some(ch.id.clone())
+                        } else {
+                            self.get_channel_list().first().map(|ch| ch.id.clone())
+                        }
+                    };
 
                     if let Some(channel_id) = first_channel_id {
                         self.ui.selected_channel = Some(channel_id.clone());
@@ -178,11 +212,51 @@ impl AppState {
 
     /// キー入力を処理
     fn handle_key_press(&mut self, key: KeyCode) -> Command {
+        // 検索モード時の処理
+        if self.ui.search_mode {
+            return match key {
+                KeyCode::Esc => {
+                    self.toggle_search_mode();
+                    Command::None
+                }
+                KeyCode::Backspace => {
+                    self.search_backspace();
+                    Command::None
+                }
+                KeyCode::Up => self.select_previous_channel(),
+                KeyCode::Down => self.select_next_channel(),
+                KeyCode::Enter => {
+                    // チャンネル選択確定
+                    if let Some(channel_id) = &self.ui.selected_channel {
+                        Command::LoadMessages(channel_id.clone())
+                    } else {
+                        Command::None
+                    }
+                }
+                KeyCode::Char(c) => {
+                    self.search_input(c);
+                    Command::None
+                }
+                _ => Command::None,
+            };
+        }
+
+        // 通常モード・編集モードの処理
         match self.ui.input_mode {
             InputMode::Normal => match key {
                 KeyCode::Char('q') => Command::None, // Quit は main.rs で処理
                 KeyCode::Char('i') => {
                     self.ui.input_mode = InputMode::Editing;
+                    Command::None
+                }
+                KeyCode::Char('/') => {
+                    // 検索モードに切り替え
+                    self.toggle_search_mode();
+                    Command::None
+                }
+                KeyCode::Char('f') => {
+                    // お気に入り登録/解除
+                    self.toggle_favorite();
                     Command::None
                 }
                 KeyCode::Up | KeyCode::Char('k') => self.select_previous_channel(),
@@ -229,10 +303,21 @@ impl AppState {
         }
     }
 
+    /// 現在表示中のチャンネルリストを取得（検索モード/お気に入りモード対応）
+    fn get_current_display_channels(&self) -> Vec<&Channel> {
+        if self.ui.search_mode {
+            // 検索モード: 検索結果を返す
+            self.search_channels(&self.ui.search_buffer)
+        } else {
+            // 通常モード: お気に入りを返す
+            self.get_favorite_channels()
+        }
+    }
+
     /// 前のチャンネルを選択
     fn select_previous_channel(&mut self) -> Command {
         let channel_ids: Vec<String> = self
-            .get_channel_list()
+            .get_current_display_channels()
             .iter()
             .map(|ch| ch.id.clone())
             .collect();
@@ -258,7 +343,7 @@ impl AppState {
     /// 次のチャンネルを選択
     fn select_next_channel(&mut self) -> Command {
         let channel_ids: Vec<String> = self
-            .get_channel_list()
+            .get_current_display_channels()
             .iter()
             .map(|ch| ch.id.clone())
             .collect();
@@ -292,6 +377,109 @@ impl AppState {
             }
         });
         channels
+    }
+
+    /// お気に入りチャンネルリストを取得（ソート済み）
+    pub fn get_favorite_channels(&self) -> Vec<&Channel> {
+        let mut favorites: Vec<&Channel> = self
+            .discord
+            .channels
+            .values()
+            .filter(|ch| self.ui.favorites.contains(&ch.id))
+            .collect();
+
+        favorites.sort_by(|a, b| {
+            match a.channel_type.cmp(&b.channel_type) {
+                std::cmp::Ordering::Equal => a.display_name().cmp(&b.display_name()),
+                other => other,
+            }
+        });
+
+        favorites
+    }
+
+    /// チャンネルを検索（名前・ギルド名でフィルタリング）
+    pub fn search_channels(&self, query: &str) -> Vec<&Channel> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let query_lower = query.to_lowercase();
+        let mut results: Vec<&Channel> = self
+            .discord
+            .channels
+            .values()
+            .filter(|ch| {
+                // チャンネル名で検索
+                let name_match = ch.display_name().to_lowercase().contains(&query_lower);
+
+                // ギルド名で検索
+                let guild_match = if let Some(guild_id) = &ch.guild_id {
+                    if let Some(guild) = self.discord.guilds.get(guild_id) {
+                        guild.name.to_lowercase().contains(&query_lower)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                name_match || guild_match
+            })
+            .collect();
+
+        results.sort_by(|a, b| {
+            match a.channel_type.cmp(&b.channel_type) {
+                std::cmp::Ordering::Equal => a.display_name().cmp(&b.display_name()),
+                other => other,
+            }
+        });
+
+        results
+    }
+
+    /// お気に入りを登録/解除
+    pub fn toggle_favorite(&mut self) {
+        if let Some(channel_id) = &self.ui.selected_channel {
+            if self.ui.favorites.contains(channel_id) {
+                self.ui.favorites.remove(channel_id);
+                log::info!("Removed from favorites: {}", channel_id);
+            } else {
+                self.ui.favorites.insert(channel_id.clone());
+                log::info!("Added to favorites: {}", channel_id);
+            }
+        }
+    }
+
+    /// 検索モードを切り替え
+    pub fn toggle_search_mode(&mut self) {
+        self.ui.search_mode = !self.ui.search_mode;
+
+        if self.ui.search_mode {
+            // 検索モードに入る時はバッファをクリア
+            self.ui.search_buffer.clear();
+            log::debug!("Entered search mode");
+        } else {
+            // 検索モードを抜ける時はバッファをクリア
+            self.ui.search_buffer.clear();
+            log::debug!("Exited search mode");
+        }
+    }
+
+    /// 検索入力を追加
+    pub fn search_input(&mut self, c: char) {
+        if self.ui.search_mode {
+            self.ui.search_buffer.push(c);
+            log::debug!("Search query: {}", self.ui.search_buffer);
+        }
+    }
+
+    /// 検索入力をバックスペース
+    pub fn search_backspace(&mut self) {
+        if self.ui.search_mode {
+            self.ui.search_buffer.pop();
+            log::debug!("Search query: {}", self.ui.search_buffer);
+        }
     }
 
     /// 現在選択中のチャンネルのメッセージリストを取得
