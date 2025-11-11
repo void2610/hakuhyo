@@ -298,12 +298,11 @@ async fn validate_stored_token(token: &str) -> bool {
     }
 }
 
-/// トークンを取得（キーチェーン → 環境変数 → QRコード認証）
+/// トークンを取得（キーチェーン → QRコード認証）
 ///
 /// # 認証フロー
 /// 1. システムキーチェーンから読み込み → 検証
-/// 2. 環境変数 `DISCORD_TOKEN` をチェック → 検証 → キーチェーンに保存
-/// 3. QRコード認証を実行 → キーチェーンに保存
+/// 2. QRコード認証を実行 → キーチェーンに保存
 ///
 /// # エラー
 /// - 全ての認証方法が失敗した場合
@@ -322,29 +321,11 @@ pub async fn get_or_authenticate_token() -> Result<String> {
         log::debug!("No token found in keyring");
     }
 
-    // 2. 環境変数をチェック
-    if let Ok(token) = std::env::var("DISCORD_TOKEN") {
-        log::info!("Using token from DISCORD_TOKEN environment variable");
-        if validate_stored_token(&token).await {
-            // 有効な環境変数トークンをキーチェーンに保存
-            let token_clone = token.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = token_store::save_token(&token_clone) {
-                    log::warn!("Failed to save token to keyring: {}", e);
-                }
-            })
-            .await?;
-            return Ok(token);
-        } else {
-            log::warn!("Environment variable token is invalid");
-        }
-    }
-
-    // 3. QRコード認証を実行
+    // 2. QRコード認証を実行
     log::info!("Starting QR code authentication...");
     let token = authenticate_with_qr().await?;
 
-    // 4. 取得したトークンをキーチェーンに保存
+    // 3. 取得したトークンをキーチェーンに保存
     let token_clone = token.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = token_store::save_token(&token_clone) {
