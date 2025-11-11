@@ -112,7 +112,13 @@ async fn run_app(
                 tokio::spawn(async move {
                     let app_event = match gateway_event {
                         GatewayEvent::Ready(data) => AppEvent::GatewayReady(data),
-                        GatewayEvent::GuildCreate(channels) => AppEvent::GuildCreate(channels),
+                        GatewayEvent::GuildCreate { guild, channels } => {
+                            // ギルド情報を登録（READY後の新規ギルド参加用）
+                            // 通常は READY イベントで既に全ギルドが登録されているため、
+                            // これは後から参加したギルドの処理となる
+                            log::info!("New guild joined: {} ({})", guild.name, guild.id);
+                            AppEvent::GuildCreate { guild, channels }
+                        }
                         GatewayEvent::MessageCreate(msg) => AppEvent::MessageCreate(msg),
                         GatewayEvent::MessageUpdate(msg) => AppEvent::MessageUpdate(msg),
                         GatewayEvent::MessageDelete { id, channel_id } => {
@@ -187,27 +193,6 @@ async fn run_app(
             let rest = rest_client.clone();
             let tx = event_tx.clone();
             match command {
-                Command::LoadChannels => {
-                    tokio::spawn(async move {
-                        // まずギルドを取得
-                        if let Ok(guilds) = rest.get_guilds().await {
-                            for guild in guilds {
-                                // ギルド情報を送信
-                                let _ = tx.send(AppEvent::GuildLoaded(guild.clone())).await;
-
-                                // ギルドのチャンネルを取得
-                                if let Ok(channels) = rest.get_guild_channels(&guild.id).await {
-                                    let _ = tx.send(AppEvent::ChannelsLoaded(channels)).await;
-                                }
-                            }
-                        }
-
-                        // DM チャンネルも取得
-                        if let Ok(dm_channels) = rest.get_dm_channels().await {
-                            let _ = tx.send(AppEvent::ChannelsLoaded(dm_channels)).await;
-                        }
-                    });
-                }
                 Command::LoadMessages(channel_id) => {
                     tokio::spawn(async move {
                         if let Ok(messages) = rest.get_messages(&channel_id, 50).await {

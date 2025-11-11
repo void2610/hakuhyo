@@ -14,6 +14,7 @@ use tokio_tungstenite::{
 pub struct GatewayClient {
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     token: String,
+    #[allow(dead_code)]
     intents: u32,
     last_sequence: Arc<RwLock<Option<u64>>>,
     session_id: Option<String>,
@@ -228,18 +229,85 @@ impl GatewayClient {
 
                 match event_type {
                     "READY" => {
-                        let ready_data: ReadyData = serde_json::from_value(data).ok()?;
-                        *session_id = Some(ready_data.session_id.clone());
-                        log::info!("Gateway Ready! User: {}", ready_data.user.username);
-                        Some(GatewayEvent::Ready(ready_data))
+                        // ユーザーアカウント認証の場合、READY イベントに全てのギルド情報が含まれる
+                        let session_id_value = data.get("session_id")?.as_str()?.to_string();
+                        *session_id = Some(session_id_value.clone());
+
+                        let user: models::User = serde_json::from_value(data.get("user")?.clone()).ok()?;
+                        log::info!("Gateway Ready! User: {}", user.username);
+
+                        // ギルド情報を抽出
+                        if let Some(guilds_array) = data.get("guilds").and_then(|v| v.as_array()) {
+                            log::info!("READY event contains {} guilds", guilds_array.len());
+
+                            for guild_data in guilds_array {
+                                // ギルド情報を抽出
+                                if let (Some(guild_id), Some(guild_name), Some(owner_id)) = (
+                                    guild_data.get("id").and_then(|v| v.as_str()),
+                                    guild_data.get("properties").and_then(|p| p.get("name")).and_then(|v| v.as_str()),
+                                    guild_data.get("properties").and_then(|p| p.get("owner_id")).and_then(|v| v.as_str()),
+                                ) {
+                                    let guild = models::Guild {
+                                        id: guild_id.to_string(),
+                                        name: guild_name.to_string(),
+                                        icon: guild_data.get("properties").and_then(|p| p.get("icon")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        owner_id: owner_id.to_string(),
+                                    };
+
+                                    log::info!("READY: Guild {} ({})", guild.name, guild.id);
+
+                                    // チャンネル情報を抽出
+                                    if let Some(channels_array) = guild_data.get("channels").and_then(|v| v.as_array()) {
+                                        let mut channel_list = Vec::new();
+
+                                        for channel_data in channels_array {
+                                            if let Ok(mut channel) = serde_json::from_value::<models::Channel>(channel_data.clone()) {
+                                                // チャンネルにguild_idを設定
+                                                channel.guild_id = Some(guild.id.clone());
+
+                                                // テキストチャンネル（type 0）のみ追加
+                                                if channel.channel_type == 0 {
+                                                    channel_list.push(channel);
+                                                }
+                                            }
+                                        }
+
+                                        log::info!("READY: Loaded {} text channels for guild: {}", channel_list.len(), guild.name);
+                                    }
+                                }
+                            }
+                        }
+
+                        // READY イベント全体を返す
+                        Some(GatewayEvent::Ready(data))
                     }
                     "GUILD_CREATE" => {
+                        // ギルド情報を抽出
+                        let guild_id = data.get("id")?.as_str()?.to_string();
+                        let guild_name = data.get("name")?.as_str()?.to_string();
+                        let owner_id = data.get("owner_id")?.as_str()?.to_string();
+                        let icon = data.get("icon").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                        let guild = models::Guild {
+                            id: guild_id.clone(),
+                            name: guild_name.clone(),
+                            icon,
+                            owner_id,
+                        };
+
+                        log::info!("GUILD_CREATE: {} ({})", guild.name, guild.id);
+
                         // チャンネル情報を抽出
                         let channels = data.get("channels")?.as_array()?;
                         let mut channel_list = Vec::new();
 
                         for channel_data in channels {
-                            if let Ok(channel) = serde_json::from_value::<models::Channel>(channel_data.clone()) {
+                            if let Ok(mut channel) = serde_json::from_value::<models::Channel>(channel_data.clone()) {
+                                // チャンネルにguild_idを設定（GUILD_CREATEイベントのチャンネルにはguild_idが含まれていない場合がある）
+                                if channel.guild_id.is_none() {
+                                    channel.guild_id = Some(guild_id.clone());
+                                }
+
                                 // テキストチャンネル（type 0）のみ追加
                                 if channel.channel_type == 0 {
                                     channel_list.push(channel);
@@ -247,8 +315,8 @@ impl GatewayClient {
                             }
                         }
 
-                        log::info!("GUILD_CREATE: loaded {} text channels", channel_list.len());
-                        Some(GatewayEvent::GuildCreate(channel_list))
+                        log::info!("GUILD_CREATE: loaded {} text channels for guild: {}", channel_list.len(), guild.name);
+                        Some(GatewayEvent::GuildCreate { guild, channels: channel_list })
                     }
                     "MESSAGE_CREATE" => {
                         let message: models::Message = serde_json::from_value(data).ok()?;
@@ -282,8 +350,8 @@ impl GatewayClient {
 /// Gateway イベント
 #[derive(Debug, Clone)]
 pub enum GatewayEvent {
-    Ready(ReadyData),
-    GuildCreate(Vec<models::Channel>),
+    Ready(serde_json::Value),  // READY イベント全体（ギルド情報含む）
+    GuildCreate { guild: models::Guild, channels: Vec<models::Channel> },
     MessageCreate(models::Message),
     MessageUpdate(models::Message),
     MessageDelete { id: String, channel_id: String },

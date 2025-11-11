@@ -1,4 +1,4 @@
-use crate::discord::{Channel, Guild, Message, ReadyData};
+use crate::discord::{Channel, Guild, Message};
 use crossterm::event::KeyCode;
 
 /// アプリケーションイベント
@@ -12,10 +12,10 @@ pub enum AppEvent {
     Input(char),
 
     // Discord イベント（Gateway）
-    /// Gateway接続完了
-    GatewayReady(ReadyData),
-    /// ギルド作成（チャンネル情報取得）
-    GuildCreate(Vec<Channel>),
+    /// Gateway接続完了（READY イベント全体）
+    GatewayReady(serde_json::Value),
+    /// ギルド作成（READY後の新規ギルド参加用）
+    GuildCreate { guild: Guild, channels: Vec<Channel> },
     /// 新規メッセージ
     MessageCreate(Message),
     /// メッセージ更新
@@ -24,10 +24,6 @@ pub enum AppEvent {
     MessageDelete { id: String, channel_id: String },
 
     // コマンド完了イベント（REST API の結果）
-    /// ギルド情報読み込み完了
-    GuildLoaded(Guild),
-    /// チャンネル一覧読み込み完了
-    ChannelsLoaded(Vec<Channel>),
     /// メッセージ一覧読み込み完了
     MessagesLoaded {
         channel_id: String,

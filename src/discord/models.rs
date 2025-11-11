@@ -154,26 +154,6 @@ pub struct IdentifyProperties {
     pub device: String,
 }
 
-/// Ready イベントのデータ部分
-#[derive(Debug, Clone, Deserialize)]
-pub struct ReadyData {
-    #[allow(dead_code)]
-    pub v: u8,
-    pub user: User,
-    #[allow(dead_code)]
-    pub guilds: Vec<UnavailableGuild>,
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct UnavailableGuild {
-    #[allow(dead_code)]
-    pub id: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub unavailable: Option<bool>,
-}
-
 /// メッセージ作成リクエストのペイロード
 #[derive(Debug, Serialize)]
 pub struct CreateMessagePayload {

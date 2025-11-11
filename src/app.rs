@@ -43,7 +43,6 @@ pub enum InputMode {
 /// コマンド（副作用を持つ処理）
 #[derive(Debug, Clone)]
 pub enum Command {
-    LoadChannels,
     LoadMessages(String),
     SendMessage { channel_id: String, content: String },
     None,
@@ -89,15 +88,57 @@ impl AppState {
         match event {
             // Gateway イベント
             AppEvent::GatewayReady(ready_data) => {
-                self.discord.current_user = Some(ready_data.user);
+                // ユーザー情報を抽出
+                if let Some(user_data) = ready_data.get("user") {
+                    if let Ok(user) = serde_json::from_value(user_data.clone()) {
+                        self.discord.current_user = Some(user);
+                    }
+                }
                 self.discord.connected = true;
-                Command::LoadChannels
-            }
 
-            AppEvent::GuildCreate(channels) => {
-                // ギルドのチャンネル情報を追加
-                for channel in channels {
-                    self.discord.channels.insert(channel.id.clone(), channel);
+                // ギルド情報を抽出して登録
+                if let Some(guilds_array) = ready_data.get("guilds").and_then(|v| v.as_array()) {
+                    for guild_data in guilds_array {
+                        // ギルド情報を抽出
+                        if let (Some(guild_id), Some(guild_name), Some(owner_id)) = (
+                            guild_data.get("id").and_then(|v| v.as_str()),
+                            guild_data.get("properties").and_then(|p| p.get("name")).and_then(|v| v.as_str()),
+                            guild_data.get("properties").and_then(|p| p.get("owner_id")).and_then(|v| v.as_str()),
+                        ) {
+                            let guild = crate::discord::Guild {
+                                id: guild_id.to_string(),
+                                name: guild_name.to_string(),
+                                icon: guild_data.get("properties").and_then(|p| p.get("icon")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                owner_id: owner_id.to_string(),
+                            };
+
+                            self.discord.guilds.insert(guild.id.clone(), guild.clone());
+
+                            // チャンネル情報を抽出
+                            if let Some(channels_array) = guild_data.get("channels").and_then(|v| v.as_array()) {
+                                for channel_data in channels_array {
+                                    if let Ok(mut channel) = serde_json::from_value::<crate::discord::Channel>(channel_data.clone()) {
+                                        // チャンネルにguild_idを設定
+                                        channel.guild_id = Some(guild.id.clone());
+
+                                        // テキストチャンネル（type 0）のみ追加
+                                        if channel.channel_type == 0 {
+                                            self.discord.channels.insert(channel.id.clone(), channel);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // DM チャンネルを抽出
+                if let Some(private_channels) = ready_data.get("private_channels").and_then(|v| v.as_array()) {
+                    for channel_data in private_channels {
+                        if let Ok(channel) = serde_json::from_value::<crate::discord::Channel>(channel_data.clone()) {
+                            self.discord.channels.insert(channel.id.clone(), channel);
+                        }
+                    }
                 }
 
                 // 最初のチャンネルを選択（お気に入りを優先）
@@ -121,9 +162,33 @@ impl AppState {
                 Command::None
             }
 
-            AppEvent::GuildLoaded(guild) => {
-                // ギルド情報を保存
+            AppEvent::GuildCreate { guild, channels } => {
+                // ギルド情報を登録
                 self.discord.guilds.insert(guild.id.clone(), guild);
+
+                // ギルドのチャンネル情報を追加
+                for channel in channels {
+                    self.discord.channels.insert(channel.id.clone(), channel);
+                }
+
+                // 最初のチャンネルを選択（お気に入りを優先）
+                if self.ui.selected_channel.is_none() {
+                    let first_channel_id = {
+                        let favorites = self.get_favorite_channels();
+                        if let Some(ch) = favorites.first() {
+                            Some(ch.id.clone())
+                        } else {
+                            self.get_channel_list().first().map(|ch| ch.id.clone())
+                        }
+                    };
+
+                    if let Some(channel_id) = first_channel_id {
+                        self.ui.selected_channel = Some(channel_id.clone());
+                        self.ui.channel_list_state.select(Some(0));
+                        return Command::LoadMessages(channel_id);
+                    }
+                }
+
                 Command::None
             }
 
@@ -156,32 +221,6 @@ impl AppState {
             }
 
             // コマンド完了イベント
-            AppEvent::ChannelsLoaded(channels) => {
-                for channel in channels {
-                    self.discord.channels.insert(channel.id.clone(), channel);
-                }
-
-                // 最初のチャンネルを選択（お気に入りを優先）
-                if self.ui.selected_channel.is_none() {
-                    let first_channel_id = {
-                        let favorites = self.get_favorite_channels();
-                        if let Some(ch) = favorites.first() {
-                            Some(ch.id.clone())
-                        } else {
-                            self.get_channel_list().first().map(|ch| ch.id.clone())
-                        }
-                    };
-
-                    if let Some(channel_id) = first_channel_id {
-                        self.ui.selected_channel = Some(channel_id.clone());
-                        self.ui.channel_list_state.select(Some(0));
-                        return Command::LoadMessages(channel_id);
-                    }
-                }
-
-                Command::None
-            }
-
             AppEvent::MessagesLoaded {
                 channel_id,
                 messages,
@@ -226,7 +265,8 @@ impl AppState {
                 KeyCode::Up => self.select_previous_channel(),
                 KeyCode::Down => self.select_next_channel(),
                 KeyCode::Enter => {
-                    // チャンネル選択確定
+                    // チャンネル選択確定して検索モードを終了
+                    self.toggle_search_mode();
                     if let Some(channel_id) = &self.ui.selected_channel {
                         Command::LoadMessages(channel_id.clone())
                     } else {

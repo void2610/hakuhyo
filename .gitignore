@@ -1,2 +1,3 @@
 /target
 *.log
+ready_event.json
