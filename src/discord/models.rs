@@ -73,7 +73,9 @@ pub struct Channel {
     #[serde(default)]
     pub topic: Option<String>,
     #[serde(default)]
-    pub recipients: Option<Vec<User>>, // DM用
+    pub recipients: Option<Vec<User>>, // DM用（完全なユーザー情報）
+    #[serde(default)]
+    pub recipient_ids: Option<Vec<String>>, // DM用（ユーザーIDのみ、READYイベントで使用）
 }
 
 impl Channel {

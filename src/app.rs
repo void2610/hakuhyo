@@ -15,6 +15,7 @@ pub struct DiscordState {
     pub guilds: HashMap<String, Guild>,          // guild_id -> guild
     pub channels: HashMap<String, Channel>,
     pub messages: HashMap<String, Vec<Message>>, // channel_id -> messages
+    pub users: HashMap<String, User>,            // user_id -> user (DM表示用)
     pub current_user: Option<User>,
     pub connected: bool,
 }
@@ -56,6 +57,7 @@ impl AppState {
                 guilds: HashMap::new(),
                 channels: HashMap::new(),
                 messages: HashMap::new(),
+                users: HashMap::new(),
                 current_user: None,
                 connected: false,
             },
@@ -96,6 +98,19 @@ impl AppState {
                 }
                 self.discord.connected = true;
 
+                // users フィールドからユーザー情報をキャッシュ（DM表示用）
+                if let Some(users_array) = ready_data.get("users").and_then(|v| v.as_array()) {
+                    log::info!("Found {} users in READY event", users_array.len());
+                    for user_data in users_array {
+                        if let Ok(user) = serde_json::from_value::<User>(user_data.clone()) {
+                            self.discord.users.insert(user.id.clone(), user);
+                        }
+                    }
+                    log::info!("Cached {} users", self.discord.users.len());
+                } else {
+                    log::warn!("READY event does NOT contain users field");
+                }
+
                 // ギルド情報を抽出して登録
                 if let Some(guilds_array) = ready_data.get("guilds").and_then(|v| v.as_array()) {
                     for guild_data in guilds_array {
@@ -134,12 +149,35 @@ impl AppState {
 
                 // DM チャンネルを抽出
                 if let Some(private_channels) = ready_data.get("private_channels").and_then(|v| v.as_array()) {
-                    for channel_data in private_channels {
-                        if let Ok(channel) = serde_json::from_value::<crate::discord::Channel>(channel_data.clone()) {
+                    log::info!("Found {} private channels", private_channels.len());
+                    for channel_data in private_channels.iter() {
+                        if let Ok(mut channel) = serde_json::from_value::<crate::discord::Channel>(channel_data.clone()) {
+                            // recipient_ids から recipients を構築
+                            if let Some(recipient_ids) = &channel.recipient_ids {
+                                let mut recipients = Vec::new();
+                                for user_id in recipient_ids {
+                                    if let Some(user) = self.discord.users.get(user_id) {
+                                        recipients.push(user.clone());
+                                    } else {
+                                        log::warn!("User not found in cache: {}", user_id);
+                                    }
+                                }
+                                channel.recipients = Some(recipients);
+                            }
+
+                            log::debug!(
+                                "Adding DM channel: id={}, type={}, display_name={}",
+                                channel.id,
+                                channel.channel_type,
+                                channel.display_name()
+                            );
                             self.discord.channels.insert(channel.id.clone(), channel);
+                        } else {
+                            log::warn!("Failed to parse channel data: {}", channel_data);
                         }
                     }
                 }
+                log::info!("Total channels after READY: {}", self.discord.channels.len());
 
                 // 最初のチャンネルを選択（お気に入りを優先）
                 if self.ui.selected_channel.is_none() {
@@ -445,13 +483,17 @@ impl AppState {
         }
 
         let query_lower = query.to_lowercase();
+        log::debug!("Searching channels with query: '{}'", query_lower);
+        log::debug!("Total channels to search: {}", self.discord.channels.len());
+
         let mut results: Vec<&Channel> = self
             .discord
             .channels
             .values()
             .filter(|ch| {
                 // チャンネル名で検索
-                let name_match = ch.display_name().to_lowercase().contains(&query_lower);
+                let display_name = ch.display_name();
+                let name_match = display_name.to_lowercase().contains(&query_lower);
 
                 // ギルド名で検索
                 let guild_match = if let Some(guild_id) = &ch.guild_id {
@@ -464,9 +506,21 @@ impl AppState {
                     false
                 };
 
-                name_match || guild_match
+                let matched = name_match || guild_match;
+                if matched {
+                    log::debug!(
+                        "Matched channel: {} (type={}, guild_id={:?})",
+                        display_name,
+                        ch.channel_type,
+                        ch.guild_id
+                    );
+                }
+
+                matched
             })
             .collect();
+
+        log::debug!("Search found {} results", results.len());
 
         results.sort_by(|a, b| {
             match a.channel_type.cmp(&b.channel_type) {

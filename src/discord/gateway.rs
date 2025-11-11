@@ -278,6 +278,16 @@ impl GatewayClient {
                             }
                         }
 
+                        // private_channels の確認
+                        if let Some(private_channels) = data.get("private_channels").and_then(|v| v.as_array()) {
+                            log::info!("READY event contains {} private_channels", private_channels.len());
+                            for (idx, dm_data) in private_channels.iter().enumerate() {
+                                log::debug!("private_channels[{}]: {}", idx, dm_data);
+                            }
+                        } else {
+                            log::warn!("READY event does NOT contain private_channels field");
+                        }
+
                         // READY イベント全体を返す
                         Some(GatewayEvent::Ready(data))
                     }
