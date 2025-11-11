@@ -79,9 +79,11 @@ User Input / Gateway Events
    - Receives encrypted token, decrypts with private key
 
 2. **Token Storage** (`token_store.rs`):
-   - Saves to OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service)
+   - Saves to plaintext file: `~/.config/hakuhyo/token.txt`
+   - File permissions set to 0600 (owner read/write only on Unix systems)
    - Token validated on startup
    - Falls back to QR auth if invalid/missing
+   - ⚠️ **Security Note**: Token stored in plaintext - ensure proper file system permissions
 
 3. **Gateway Identify** (`discord/gateway.rs`):
    - Uses detailed `properties` mimicking Discord web client
@@ -164,12 +166,13 @@ The `app.rs` extracts guilds and channels directly from READY payload, not via R
 - ~~GET /guilds/{id}/channels~~
 - ~~GET /users/@me/channels~~
 
-### Keychain Integration
+### Token File Storage
 
-- **macOS**: Keychain Access via `keyring` crate with `apple-native` feature
-- Service name: `"hakuhyo"`
-- Username: `"discord_token"`
-- Token stored **without** "Bot " prefix
+- **Location**: `~/.config/hakuhyo/token.txt`
+- **Format**: Plaintext (single line)
+- **Permissions**: 0600 on Unix systems (owner read/write only)
+- **Security**: Token stored **without** "Bot " prefix
+- **Note**: File is excluded in `.gitignore` to prevent accidental commits
 
 ## Code Style
 
@@ -204,8 +207,14 @@ The `app.rs` extracts guilds and channels directly from READY payload, not via R
 
 To test fresh authentication:
 ```bash
-cargo run --release --example clear_token
+cargo run --release --example clear_token  # Deletes ~/.config/hakuhyo/token.txt
 cargo run --release  # Will prompt for QR code
+```
+
+Or manually:
+```bash
+rm ~/.config/hakuhyo/token.txt
+cargo run --release
 ```
 
 ## Known Limitations

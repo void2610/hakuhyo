@@ -137,8 +137,8 @@ Hakuhyoは **The Elm Architecture (TEA)** パターンに基づいて設計さ�
 
 ### セキュリティ
 
-- トークンはOSキーチェーン（macOS Keychain/Windows Credential Manager/Linux Secret Service）で安全に管理
-- ソースコードへのハードコード禁止
+- **保存先**: `~/.config/hakuhyo/token.txt`
+- **ファイルパーミッション**: 0600（所有者のみ読み書き可能）
 
 ## トラブルシューティング
 

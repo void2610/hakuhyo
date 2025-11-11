@@ -1,60 +1,92 @@
 use anyhow::{Context, Result};
-use keyring::Entry;
+use std::fs;
+use std::path::PathBuf;
 
-const SERVICE_NAME: &str = "hakuhyo";
-const USERNAME: &str = "discord_token";
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
-/// トークンをシステムのキーチェーンに保存
+/// トークンファイルのパスを取得
+///
+/// `~/.config/hakuhyo/token.txt`
+fn get_token_path() -> Result<PathBuf> {
+    let config_dir = dirs::config_dir()
+        .context("Failed to get config directory")?
+        .join("hakuhyo");
+
+    // ディレクトリが存在しない場合は作成
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir)
+            .context("Failed to create config directory")?;
+        log::debug!("Created config directory: {:?}", config_dir);
+    }
+
+    Ok(config_dir.join("token.txt"))
+}
+
+/// トークンをファイルに保存
 ///
 /// # セキュリティ
-/// - macOS: Keychain Services（システムレベルの暗号化）
-/// - Windows: Credential Manager（DPAPI暗号化）
-/// - Linux: Secret Service（GNOME Keyring/KWalletなど）
+/// - ファイルパーミッション: 0600（所有者のみ読み書き可能）
+/// - 保存先: ~/.config/hakuhyo/token.txt
+/// - ⚠️ 平文で保存されるため、バックアップやクラウド同期に注意
 pub fn save_token(token: &str) -> Result<()> {
-    log::debug!("Saving token to system keyring...");
+    log::debug!("Saving token to file...");
 
-    let entry = Entry::new(SERVICE_NAME, USERNAME)
-        .context("Failed to create keyring entry")?;
+    let token_path = get_token_path()?;
 
-    entry
-        .set_password(token)
-        .context("Failed to save token to keyring")?;
+    // トークンをファイルに書き込み
+    fs::write(&token_path, token)
+        .with_context(|| format!("Failed to write token file: {:?}", token_path))?;
 
-    log::info!("✓ Token saved to system keyring");
+    // Unix系OSの場合、ファイルパーミッションを 0600 に設定（所有者のみ読み書き可能）
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(&token_path)?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&token_path, permissions)?;
+        log::debug!("Set token file permissions to 0600");
+    }
+
+    log::info!("✓ Token saved to {:?}", token_path);
     Ok(())
 }
 
-/// トークンをシステムのキーチェーンから取得
+/// トークンをファイルから読み込み
 pub fn load_token() -> Result<String> {
-    log::debug!("Loading token from system keyring...");
+    log::debug!("Loading token from file...");
 
-    let entry = Entry::new(SERVICE_NAME, USERNAME)
-        .context("Failed to create keyring entry")?;
+    let token_path = get_token_path()?;
 
-    let token = entry
-        .get_password()
-        .context("No token found in keyring")?;
+    if !token_path.exists() {
+        anyhow::bail!("Token file not found");
+    }
 
-    log::info!("✓ Token loaded from system keyring");
-    Ok(token)
+    let token = fs::read_to_string(&token_path)
+        .with_context(|| format!("Failed to read token file: {:?}", token_path))?;
+
+    log::info!("✓ Token loaded from {:?}", token_path);
+    Ok(token.trim().to_string())
 }
 
-/// トークンをシステムのキーチェーンから削除
+/// トークンをファイルから削除
 ///
 /// # 用途
 /// - 無効なトークンを削除する場合
 /// - ユーザーが明示的にログアウトする場合
 #[allow(dead_code)]
 pub fn delete_token() -> Result<()> {
-    log::debug!("Deleting token from system keyring...");
+    log::debug!("Deleting token file...");
 
-    let entry = Entry::new(SERVICE_NAME, USERNAME)
-        .context("Failed to create keyring entry")?;
+    let token_path = get_token_path()?;
 
-    entry
-        .delete_credential()
-        .context("Failed to delete token from keyring")?;
+    if token_path.exists() {
+        fs::remove_file(&token_path)
+            .with_context(|| format!("Failed to delete token file: {:?}", token_path))?;
+        log::info!("✓ Token file deleted: {:?}", token_path);
+    } else {
+        log::debug!("Token file does not exist, nothing to delete");
+    }
 
-    log::info!("✓ Token deleted from system keyring");
     Ok(())
 }

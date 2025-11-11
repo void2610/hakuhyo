@@ -1,3 +1,6 @@
 /target
 *.log
 ready_event.json
+
+# トークンファイル（平文保存のため除外）
+token.txt
