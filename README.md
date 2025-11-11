@@ -1,4 +1,4 @@
-# Hakuhyo (白兵)
+# Hakuhyo (薄氷)
 
 Rustで実装された軽量なDiscord TUIクライアント
 
