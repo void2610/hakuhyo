@@ -1,10 +1,10 @@
 use crate::app::{AppState, InputMode};
 use chrono::{DateTime, Utc};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -29,8 +29,19 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
         ])
         .split(main_chunks[1]);
 
-    // チャンネルリストを描画
-    render_channel_list(frame, app, main_chunks[0]);
+    // 検索モードでない場合のみ、お気に入りリストを描画
+    if !app.ui.search_mode {
+        render_channel_list(frame, app, main_chunks[0]);
+    } else {
+        // 検索モード時は空のお気に入りパネルを表示
+        let empty_list = List::new(Vec::<ListItem>::new()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Favorites")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        frame.render_widget(empty_list, main_chunks[0]);
+    }
 
     // メッセージリストを描画
     render_message_list(frame, app, content_chunks[0]);
@@ -40,22 +51,19 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
 
     // ステータスバーを描画
     render_status_bar(frame, app, content_chunks[2]);
+
+    // 検索モードの場合、最後にオーバーレイを描画
+    if app.ui.search_mode {
+        render_search_overlay(frame, app);
+    }
 }
 
-/// チャンネルリストを描画（お気に入りまたは検索結果）
+/// チャンネルリストを描画（お気に入り）
 fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
-    // 検索モードまたは通常モード（お気に入り）で表示を切り替え
-    let (channels, title) = if app.ui.search_mode {
-        // 検索モード: 検索結果を表示
-        let results = app.search_channels(&app.ui.search_buffer);
-        (results, format!("Search: {}", app.ui.search_buffer))
-    } else {
-        // 通常モード: お気に入りを表示
-        let favorites = app.get_favorite_channels();
-        (favorites, "Favorites (Press / to search)".to_string())
-    };
+    // 通常モード: お気に入りを表示
+    let favorites = app.get_favorite_channels();
 
-    let items: Vec<ListItem> = channels
+    let items: Vec<ListItem> = favorites
         .iter()
         .map(|channel| {
             let prefix = channel.type_prefix();
@@ -73,11 +81,7 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
             };
 
             // お気に入りマークを追加
-            let favorite_mark = if app.ui.favorites.contains(&channel.id) {
-                "⭐ "
-            } else {
-                ""
-            };
+            let favorite_mark = "⭐ ";
 
             let content = format!("{}{}{}{}", favorite_mark, guild_name, prefix, name);
 
@@ -97,7 +101,7 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(title)
+                .title("Favorites")
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .highlight_style(
@@ -256,6 +260,109 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: ratatui::layou
     let paragraph = Paragraph::new(status_line).alignment(Alignment::Left);
 
     frame.render_widget(paragraph, area);
+}
+
+/// 検索オーバーレイを描画（Spotlightスタイル）
+fn render_search_overlay(frame: &mut Frame, app: &mut AppState) {
+    let area = frame.area();
+
+    // 画面中央に配置するための計算
+    let vertical_margin = area.height / 6; // 上部の余白
+    let horizontal_margin = area.width / 5; // 左右の余白
+
+    // オーバーレイの領域を計算
+    let overlay_area = Rect {
+        x: area.x + horizontal_margin,
+        y: area.y + vertical_margin,
+        width: area.width.saturating_sub(horizontal_margin * 2),
+        height: area.height.saturating_sub(vertical_margin * 2),
+    };
+
+    // 検索結果を取得
+    let results = app.search_channels(&app.ui.search_buffer);
+    let result_count = results.len();
+
+    // 表示する結果の最大数を計算（検索ボックスとボーダーの分を除く）
+    let max_results = (overlay_area.height as usize).saturating_sub(4).min(result_count);
+
+    // オーバーレイレイアウト: 検索ボックス | 結果リスト
+    let overlay_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),           // 検索ボックス
+            Constraint::Min(1),              // 結果リスト
+        ])
+        .split(overlay_area);
+
+    // 背景をクリア（オーバーレイ効果）
+    frame.render_widget(Clear, overlay_area);
+
+    // 検索ボックスを描画
+    let search_input = Paragraph::new(app.ui.search_buffer.as_str())
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Search ({} results) ", result_count))
+                .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(Color::Black)),
+        );
+
+    frame.render_widget(search_input, overlay_chunks[0]);
+
+    // カーソル表示
+    let cursor_x = overlay_chunks[0].x + app.ui.search_buffer.len() as u16 + 1;
+    let cursor_y = overlay_chunks[0].y + 1;
+    frame.set_cursor_position((cursor_x, cursor_y));
+
+    // 結果リストを描画
+    let items: Vec<ListItem> = results
+        .iter()
+        .take(max_results)
+        .map(|channel| {
+            let prefix = channel.type_prefix();
+            let name = channel.display_name();
+
+            // ギルド名を取得
+            let guild_name = if let Some(guild_id) = &channel.guild_id {
+                if let Some(guild) = app.discord.guilds.get(guild_id) {
+                    format!("[{}] ", guild.name)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            // お気に入りマークを追加
+            let favorite_mark = if app.ui.favorites.contains(&channel.id) {
+                "⭐ "
+            } else {
+                ""
+            };
+
+            let content = format!("{}{}{}{}", favorite_mark, guild_name, prefix, name);
+
+            ListItem::new(content)
+        })
+        .collect();
+
+    let results_list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .style(Style::default().bg(Color::Black)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(results_list, overlay_chunks[1], &mut app.ui.channel_list_state);
 }
 
 /// タイムスタンプを "HH:MM" 形式に整形（日本時間）
