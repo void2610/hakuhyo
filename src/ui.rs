@@ -101,7 +101,7 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Favorites (Press / to search)")
+                .title("Favorites")
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .highlight_style(
