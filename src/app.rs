@@ -136,9 +136,36 @@ impl AppState {
                                         // チャンネルにguild_idを設定
                                         channel.guild_id = Some(guild.id.clone());
 
-                                        // テキストチャンネル（type 0）のみ追加
-                                        if channel.channel_type == 0 {
+                                        // テキストベースのチャンネル（テキスト、フォーラム、スレッド等）を追加
+                                        if channel.is_text_based() {
+                                            log::debug!(
+                                                "Adding channel: guild={}, type={}, name={}",
+                                                guild.name,
+                                                channel.channel_type,
+                                                channel.display_name()
+                                            );
                                             self.discord.channels.insert(channel.id.clone(), channel);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // スレッド情報を抽出
+                            if let Some(threads_array) = guild_data.get("threads").and_then(|v| v.as_array()) {
+                                for thread_data in threads_array {
+                                    if let Ok(mut thread) = serde_json::from_value::<crate::discord::Channel>(thread_data.clone()) {
+                                        // スレッドにguild_idを設定
+                                        thread.guild_id = Some(guild.id.clone());
+
+                                        // テキストベースのスレッドを追加
+                                        if thread.is_text_based() {
+                                            log::debug!(
+                                                "Adding thread: guild={}, type={}, name={}",
+                                                guild.name,
+                                                thread.channel_type,
+                                                thread.display_name()
+                                            );
+                                            self.discord.channels.insert(thread.id.clone(), thread);
                                         }
                                     }
                                 }

@@ -256,6 +256,13 @@ impl GatewayClient {
 
                                     log::info!("READY: Guild {} ({})", guild.name, guild.id);
 
+                                    // ギルドのキーを確認（最初のギルドのみ）
+                                    if guilds_array.len() > 0 && guild_data == &guilds_array[0] {
+                                        if let Some(obj) = guild_data.as_object() {
+                                            log::debug!("First guild keys: {:?}", obj.keys().collect::<Vec<_>>());
+                                        }
+                                    }
+
                                     // チャンネル情報を抽出
                                     if let Some(channels_array) = guild_data.get("channels").and_then(|v| v.as_array()) {
                                         let mut channel_list = Vec::new();
@@ -265,14 +272,24 @@ impl GatewayClient {
                                                 // チャンネルにguild_idを設定
                                                 channel.guild_id = Some(guild.id.clone());
 
-                                                // テキストチャンネル（type 0）のみ追加
-                                                if channel.channel_type == 0 {
+                                                // テキストベースのチャンネル（テキスト、フォーラム、スレッド等）を追加
+                                                if channel.is_text_based() {
                                                     channel_list.push(channel);
                                                 }
                                             }
                                         }
 
-                                        log::info!("READY: Loaded {} text channels for guild: {}", channel_list.len(), guild.name);
+                                        log::info!("READY: Loaded {} text-based channels for guild: {}", channel_list.len(), guild.name);
+                                    }
+
+                                    // スレッド情報を抽出
+                                    if let Some(threads_array) = guild_data.get("threads").and_then(|v| v.as_array()) {
+                                        log::info!("READY: Guild {} has {} threads", guild.name, threads_array.len());
+                                        for thread_data in threads_array.iter().take(3) {
+                                            if let Ok(thread) = serde_json::from_value::<models::Channel>(thread_data.clone()) {
+                                                log::debug!("  Thread: type={}, name={}", thread.channel_type, thread.display_name());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -287,6 +304,23 @@ impl GatewayClient {
                         } else {
                             log::warn!("READY event does NOT contain private_channels field");
                         }
+
+                        // スレッドの確認
+                        if let Some(threads) = data.get("threads").and_then(|v| v.as_array()) {
+                            log::info!("READY event contains {} threads", threads.len());
+                            for thread_data in threads.iter().take(5) {
+                                if let Some(thread_type) = thread_data.get("type") {
+                                    if let Some(thread_name) = thread_data.get("name") {
+                                        log::debug!("Thread: type={}, name={}", thread_type, thread_name);
+                                    }
+                                }
+                            }
+                        } else {
+                            log::info!("READY event does NOT contain threads field");
+                        }
+
+                        // READYイベントのトップレベルキーを確認
+                        log::debug!("READY event top-level keys: {:?}", data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
 
                         // READY イベント全体を返す
                         Some(GatewayEvent::Ready(data))
@@ -318,14 +352,14 @@ impl GatewayClient {
                                     channel.guild_id = Some(guild_id.clone());
                                 }
 
-                                // テキストチャンネル（type 0）のみ追加
-                                if channel.channel_type == 0 {
+                                // テキストベースのチャンネル（テキスト、フォーラム、スレッド等）を追加
+                                if channel.is_text_based() {
                                     channel_list.push(channel);
                                 }
                             }
                         }
 
-                        log::info!("GUILD_CREATE: loaded {} text channels for guild: {}", channel_list.len(), guild.name);
+                        log::info!("GUILD_CREATE: loaded {} text-based channels for guild: {}", channel_list.len(), guild.name);
                         Some(GatewayEvent::GuildCreate { guild, channels: channel_list })
                     }
                     "MESSAGE_CREATE" => {
