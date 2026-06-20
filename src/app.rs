@@ -32,6 +32,8 @@ pub struct DiscordState {
     pub image_sources: HashMap<String, image::DynamicImage>,
     /// ダウンロード中の attachment_id
     pub image_downloading: HashSet<String>,
+    /// 過去メッセージ追加読み込み中の channel_id (重複防止)
+    pub loading_older: HashSet<String>,
 }
 
 /// UI関連の状態
@@ -61,6 +63,8 @@ pub enum InputMode {
 #[derive(Debug, Clone)]
 pub enum Command {
     LoadMessages(String),
+    /// 指定 message_id より古いメッセージを追加読み込み
+    LoadOlderMessages { channel_id: String, before: String },
     SendMessage { channel_id: String, content: String },
     OpenInDiscord { guild_id: Option<String>, channel_id: String },
     /// 画像添付ファイルのダウンロード (attachment_id, url)
@@ -83,6 +87,7 @@ impl AppState {
                 image_resized: HashMap::new(),
                 image_sources: HashMap::new(),
                 image_downloading: HashSet::new(),
+                loading_older: HashSet::new(),
             },
             ui: UiState {
                 selected_channel: None,
@@ -376,7 +381,29 @@ impl AppState {
 
             AppEvent::ScrollMessages(delta) => {
                 self.apply_scroll(delta);
-                Command::None
+                if delta > 0 {
+                    // 上方向 (古い側) スクロール時、必要なら追加読み込みを起動
+                    self.maybe_load_older_messages()
+                } else {
+                    Command::None
+                }
+            }
+
+            AppEvent::OlderMessagesLoaded {
+                channel_id,
+                messages,
+            } => {
+                self.discord.loading_older.remove(&channel_id);
+                let pending = self.collect_pending_image_downloads(&messages);
+                if let Some(existing) = self.discord.messages.get_mut(&channel_id) {
+                    // REST は新→古の順で返すため、既存の末尾 (= 古い側) に append
+                    existing.extend(messages);
+                }
+                if pending.is_empty() {
+                    Command::None
+                } else {
+                    Command::DownloadImages(pending)
+                }
             }
 
             // UI イベント
@@ -447,7 +474,7 @@ impl AppState {
                 }
                 KeyCode::Char('e') => {
                     self.apply_scroll(1);
-                    Command::None
+                    self.maybe_load_older_messages()
                 }
                 KeyCode::Char('d') => {
                     self.apply_scroll(-1);
@@ -577,6 +604,28 @@ impl AppState {
 
         // チャンネル切り替え時に自動的にメッセージを読み込む
         Command::LoadMessages(channel_ids[new_index].clone())
+    }
+
+    /// 古い側にスクロールしたとき、必要なら追加メッセージ読み込みを起動する。
+    /// 既に読み込み中、または最古メッセージが未取得の場合は何もしない。
+    fn maybe_load_older_messages(&mut self) -> Command {
+        let Some(channel_id) = self.ui.selected_channel.clone() else {
+            return Command::None;
+        };
+        if self.discord.loading_older.contains(&channel_id) {
+            return Command::None;
+        }
+        let Some(messages) = self.discord.messages.get(&channel_id) else {
+            return Command::None;
+        };
+        // REST は新→古順なので、配列の末尾が最古
+        let Some(oldest) = messages.last() else {
+            return Command::None;
+        };
+        let before = oldest.id.clone();
+        self.discord.loading_older.insert(channel_id.clone());
+        log::debug!("Loading older messages for {} before {}", channel_id, before);
+        Command::LoadOlderMessages { channel_id, before }
     }
 
     /// メッセージリストを行単位でスクロール (正: 古い側 / 負: 新しい側)。

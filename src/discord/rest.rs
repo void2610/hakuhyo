@@ -24,13 +24,22 @@ impl DiscordRestClient {
     }
 
     /// チャンネルのメッセージを取得
-    pub async fn get_messages(&self, channel_id: &str, limit: u8) -> Result<Vec<Message>> {
-        let url = format!(
+    /// `before` を指定すると、その message_id より古いものを返す
+    pub async fn get_messages(
+        &self,
+        channel_id: &str,
+        limit: u8,
+        before: Option<&str>,
+    ) -> Result<Vec<Message>> {
+        let mut url = format!(
             "{}/channels/{}/messages?limit={}",
             API_BASE,
             channel_id,
             limit.min(100)
         );
+        if let Some(before_id) = before {
+            url.push_str(&format!("&before={}", before_id));
+        }
         self.get(&url).await
     }
 

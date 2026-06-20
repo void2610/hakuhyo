@@ -230,13 +230,37 @@ async fn run_app(
             match command {
                 Command::LoadMessages(channel_id) => {
                     tokio::spawn(async move {
-                        if let Ok(messages) = rest.get_messages(&channel_id, 50).await {
+                        if let Ok(messages) = rest.get_messages(&channel_id, 50, None).await {
                             let _ = tx
                                 .send(AppEvent::MessagesLoaded {
                                     channel_id,
                                     messages,
                                 })
                                 .await;
+                        }
+                    });
+                }
+                Command::LoadOlderMessages { channel_id, before } => {
+                    tokio::spawn(async move {
+                        match rest.get_messages(&channel_id, 50, Some(&before)).await {
+                            Ok(messages) => {
+                                let _ = tx
+                                    .send(AppEvent::OlderMessagesLoaded {
+                                        channel_id,
+                                        messages,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to load older messages: {}", e);
+                                // 失敗時もロード中フラグを解除する (空の結果を送る)
+                                let _ = tx
+                                    .send(AppEvent::OlderMessagesLoaded {
+                                        channel_id,
+                                        messages: Vec::new(),
+                                    })
+                                    .await;
+                            }
                         }
                     });
                 }
