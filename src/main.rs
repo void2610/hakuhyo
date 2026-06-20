@@ -101,7 +101,7 @@ async fn run_app(
 
     let gateway_url = rest_client.get_gateway_url().await?;
     log::info!("Gateway URL: {}", gateway_url);
-    let gateway_client = GatewayClient::connect(token, gateway_url).await?;
+    let gateway_client = GatewayClient::new(token, gateway_url);
 
     // Gateway イベントハンドラ
     let gateway_event_tx = event_tx.clone();
