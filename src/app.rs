@@ -46,6 +46,7 @@ pub enum InputMode {
 pub enum Command {
     LoadMessages(String),
     SendMessage { channel_id: String, content: String },
+    OpenInDiscord { guild_id: Option<String>, channel_id: String },
     None,
 }
 
@@ -361,6 +362,22 @@ impl AppState {
                     // お気に入り登録/解除
                     self.toggle_favorite();
                     Command::None
+                }
+                KeyCode::Char('o') => {
+                    // 現在のチャンネルを Discord アプリで開く
+                    if let Some(channel_id) = &self.ui.selected_channel {
+                        let guild_id = self
+                            .discord
+                            .channels
+                            .get(channel_id)
+                            .and_then(|ch| ch.guild_id.clone());
+                        Command::OpenInDiscord {
+                            guild_id,
+                            channel_id: channel_id.clone(),
+                        }
+                    } else {
+                        Command::None
+                    }
                 }
                 KeyCode::Up | KeyCode::Char('k') => self.select_previous_channel(),
                 KeyCode::Down | KeyCode::Char('j') => self.select_next_channel(),

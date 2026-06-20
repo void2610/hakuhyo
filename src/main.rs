@@ -217,6 +217,28 @@ async fn run_app(
                         }
                     });
                 }
+                Command::OpenInDiscord { guild_id, channel_id } => {
+                    // discord://-/channels/<guild_or_@me>/<channel_id>
+                    let guild_segment = guild_id.unwrap_or_else(|| "@me".to_string());
+                    let url = format!("discord://-/channels/{}/{}", guild_segment, channel_id);
+                    log::info!("Opening in Discord app: {}", url);
+                    tokio::spawn(async move {
+                        let opener = if cfg!(target_os = "macos") {
+                            "open"
+                        } else if cfg!(target_os = "windows") {
+                            "start"
+                        } else {
+                            "xdg-open"
+                        };
+                        let result = tokio::process::Command::new(opener)
+                            .arg(&url)
+                            .status()
+                            .await;
+                        if let Err(e) = result {
+                            log::error!("Failed to launch Discord ({}): {}", opener, e);
+                        }
+                    });
+                }
                 Command::None => {}
             }
         }
