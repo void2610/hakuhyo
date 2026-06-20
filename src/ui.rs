@@ -418,7 +418,7 @@ fn build_message_line(msg: &Message) -> Line<'_> {
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            format!("{}: ", msg.author.username),
+            format!("{}: ", msg.author_display_name()),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
