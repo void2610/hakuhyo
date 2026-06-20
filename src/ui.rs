@@ -184,7 +184,27 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
 
     let title = if let Some(channel_id) = &app.ui.selected_channel {
         if let Some(channel) = app.discord.channels.get(channel_id) {
-            format!("Messages - {}", channel.display_name())
+            let guild_name = channel
+                .guild_id
+                .as_ref()
+                .and_then(|gid| app.discord.guilds.get(gid))
+                .map(|g| format!("[{}] ", g.name))
+                .unwrap_or_default();
+
+            let parent_name = channel
+                .parent_id
+                .as_ref()
+                .and_then(|pid| app.discord.channels.get(pid))
+                .map(|p| format!("{} > ", p.display_name()))
+                .unwrap_or_default();
+
+            format!(
+                " {}{}{}{} ",
+                guild_name,
+                parent_name,
+                channel.type_prefix(),
+                channel.display_name()
+            )
         } else {
             "Messages".to_string()
         }
