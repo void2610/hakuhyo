@@ -1,5 +1,6 @@
 use crate::app::{AppState, InputMode};
 use chrono::{DateTime, Utc};
+use unicode_width::UnicodeWidthStr;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -224,7 +225,8 @@ fn render_input_area(frame: &mut Frame, app: &mut AppState, area: ratatui::layou
 
     // カーソル表示（編集モードの場合）
     if app.ui.input_mode == InputMode::Editing {
-        let cursor_x = area.x + app.ui.input_buffer.len() as u16 + 1;
+        // 全角文字を考慮し、バイト長ではなく表示幅でカーソル位置を計算
+        let cursor_x = area.x + app.ui.input_buffer.width() as u16 + 1;
         let cursor_y = area.y + 1;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
@@ -310,8 +312,8 @@ fn render_search_overlay(frame: &mut Frame, app: &mut AppState) {
 
     frame.render_widget(search_input, overlay_chunks[0]);
 
-    // カーソル表示
-    let cursor_x = overlay_chunks[0].x + app.ui.search_buffer.len() as u16 + 1;
+    // カーソル表示（全角文字を考慮した表示幅で計算）
+    let cursor_x = overlay_chunks[0].x + app.ui.search_buffer.width() as u16 + 1;
     let cursor_y = overlay_chunks[0].y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
 
