@@ -3,6 +3,7 @@ use crossterm::event::KeyCode;
 
 /// アプリケーションイベント
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AppEvent {
     // UI イベント
     /// キー入力
@@ -35,6 +36,11 @@ pub enum AppEvent {
     },
     /// メッセージ送信完了
     MessageSent(Message),
+    /// 画像添付ファイルのデコード完了 (DynamicImage は重いので Box で包む)
+    AttachmentImageLoaded {
+        attachment_id: String,
+        image: Box<image::DynamicImage>,
+    },
 
     // システムイベント
     /// 定期的な描画更新

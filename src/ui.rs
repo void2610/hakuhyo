@@ -1,4 +1,5 @@
 use crate::app::{AppState, InputMode};
+use crate::discord::Message;
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthStr;
 use ratatui::{
@@ -8,6 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
+use ratatui_image::StatefulImage;
 
 /// TUIを描画
 pub fn render(frame: &mut Frame, app: &mut AppState) {
@@ -125,63 +127,7 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
 
 /// メッセージリストを描画
 fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
-    let mut messages = app.get_current_messages();
-
-    if messages.is_empty() {
-        let placeholder = Paragraph::new("No messages")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Messages")
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .alignment(Alignment::Center);
-
-        frame.render_widget(placeholder, area);
-        return;
-    }
-
-    // メッセージを逆順にして、古い順にする
-    messages.reverse();
-
-    let items: Vec<ListItem> = messages
-        .iter()
-        .map(|msg| {
-            // タイムスタンプを整形
-            let time = format_timestamp(&msg.timestamp);
-
-            // メッセージを1行で構築
-            let mut spans = vec![
-                Span::styled(
-                    format!("[{}] ", time),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("{}: ", msg.author.username),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ),
-            ];
-
-            // テキストコンテンツを追加
-            if !msg.content.is_empty() {
-                spans.push(Span::raw(&msg.content));
-            }
-
-            // 添付ファイル情報を同じ行に追加
-            for (i, attachment) in msg.attachments.iter().enumerate() {
-                if i > 0 || !msg.content.is_empty() {
-                    spans.push(Span::raw(" "));
-                }
-                spans.push(Span::styled(
-                    attachment.display_text(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::ITALIC),
-                ));
-            }
-
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-
+    // タイトル算出
     let title = if let Some(channel_id) = &app.ui.selected_channel {
         if let Some(channel) = app.discord.channels.get(channel_id) {
             let guild_name = channel
@@ -212,19 +158,133 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         "Messages".to_string()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    // メッセージリストの状態を使って、最後のメッセージを表示
-    let last_index = messages.len().saturating_sub(1);
-    let mut state = app.ui.message_list_state.clone();
-    state.select(Some(last_index));
+    // 借用衝突を避けるため、表示対象のメッセージを clone で抽出
+    let messages: Vec<Message> = app
+        .get_current_messages()
+        .iter()
+        .map(|m| (*m).clone())
+        .collect();
 
-    frame.render_stateful_widget(list, area, &mut state);
+    if messages.is_empty() {
+        let placeholder = Paragraph::new("No messages").alignment(Alignment::Center);
+        frame.render_widget(placeholder, inner);
+        return;
+    }
+
+    // 1メッセージあたりの画像表示高さ (セル単位)
+    const IMAGE_HEIGHT: u16 = 10;
+
+    // 各メッセージの高さと、表示する画像 attachment_id を最新→古い順で計算
+    let mut visible: Vec<(Message, u16, Option<String>)> = Vec::new();
+    let mut total: u16 = 0;
+    for msg in messages.iter().rev() {
+        let image_att_id = msg
+            .attachments
+            .iter()
+            .find(|a| {
+                a.content_type
+                    .as_deref()
+                    .is_some_and(|ct| ct.starts_with("image/"))
+                    && app.discord.image_protocols.contains_key(&a.id)
+            })
+            .map(|a| a.id.clone());
+        let h: u16 = if image_att_id.is_some() {
+            1 + IMAGE_HEIGHT
+        } else {
+            1
+        };
+        if total.saturating_add(h) > inner.height {
+            break;
+        }
+        total += h;
+        visible.push((msg.clone(), h, image_att_id));
+    }
+    // 古い→新しい順に並べ替え
+    visible.reverse();
+
+    // 上部余白 + 各メッセージで縦 Layout
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(visible.len() + 1);
+    constraints.push(Constraint::Min(0));
+    for (_, h, _) in &visible {
+        constraints.push(Constraint::Length(*h));
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    for (idx, (msg, _, img_id)) in visible.iter().enumerate() {
+        let chunk = chunks[idx + 1];
+
+        // 1 行目: テキスト
+        let text_area = Rect {
+            x: chunk.x,
+            y: chunk.y,
+            width: chunk.width,
+            height: 1.min(chunk.height),
+        };
+        let line = build_message_line(msg);
+        frame.render_widget(Paragraph::new(line), text_area);
+
+        // 2 行目以降: 画像
+        if let Some(att_id) = img_id {
+            if chunk.height > 1 {
+                let img_area = Rect {
+                    x: chunk.x,
+                    y: chunk.y + 1,
+                    width: chunk.width,
+                    height: chunk.height - 1,
+                };
+                if let Some(protocol) = app.discord.image_protocols.get_mut(att_id) {
+                    let widget = StatefulImage::new(None);
+                    frame.render_stateful_widget(widget, img_area, protocol);
+                }
+            }
+        }
+    }
+}
+
+/// 1メッセージ分のテキスト行を構築
+fn build_message_line(msg: &Message) -> Line<'_> {
+    let time = format_timestamp(&msg.timestamp);
+
+    let mut spans = vec![
+        Span::styled(
+            format!("[{}] ", time),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!("{}: ", msg.author.username),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if !msg.content.is_empty() {
+        spans.push(Span::raw(&msg.content));
+    }
+
+    for (i, attachment) in msg.attachments.iter().enumerate() {
+        if i > 0 || !msg.content.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            attachment.display_text(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::ITALIC),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 /// 入力エリアを描画

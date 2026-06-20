@@ -2,12 +2,18 @@ use crate::discord::{Channel, Guild, Message, User};
 use crate::events::AppEvent;
 use crossterm::event::KeyCode;
 use ratatui::widgets::ListState;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
+// ratatui-image 2.x では StatefulProtocol は trait なので Box<dyn ...> で保持する
+type BoxedImageProtocol = Box<dyn StatefulProtocol>;
 use std::collections::{HashMap, HashSet};
 
 /// アプリケーション全体の状態
 pub struct AppState {
     pub discord: DiscordState,
     pub ui: UiState,
+    /// 画像表示用 Picker (起動時にターミナル能力を問い合わせて作成)
+    pub picker: Option<Picker>,
 }
 
 /// Discord関連の状態
@@ -18,6 +24,10 @@ pub struct DiscordState {
     pub users: HashMap<String, User>,            // user_id -> user (DM表示用)
     pub current_user: Option<User>,
     pub connected: bool,
+    /// attachment_id -> 描画用プロトコル
+    pub image_protocols: HashMap<String, BoxedImageProtocol>,
+    /// ダウンロード中の attachment_id
+    pub image_downloading: HashSet<String>,
 }
 
 /// UI関連の状態
@@ -47,6 +57,8 @@ pub enum Command {
     LoadMessages(String),
     SendMessage { channel_id: String, content: String },
     OpenInDiscord { guild_id: Option<String>, channel_id: String },
+    /// 画像添付ファイルのダウンロード (attachment_id, url)
+    DownloadImages(Vec<(String, String)>),
     None,
 }
 
@@ -61,6 +73,8 @@ impl AppState {
                 users: HashMap::new(),
                 current_user: None,
                 connected: false,
+                image_protocols: HashMap::new(),
+                image_downloading: HashSet::new(),
             },
             ui: UiState {
                 selected_channel: None,
@@ -72,7 +86,43 @@ impl AppState {
                 search_mode: false,
                 search_buffer: String::new(),
             },
+            picker: None,
         }
+    }
+
+    /// 描画用 Picker を設定
+    pub fn set_picker(&mut self, picker: Option<Picker>) {
+        self.picker = picker;
+    }
+
+    /// メッセージ内の画像 attachment のうち、まだ未ダウンロード/未進行のものをキューに入れる。
+    /// 返り値はダウンロード対象 (attachment_id, url) のリスト。
+    fn collect_pending_image_downloads(
+        &mut self,
+        messages: &[Message],
+    ) -> Vec<(String, String)> {
+        let mut to_download = Vec::new();
+        for msg in messages {
+            for att in &msg.attachments {
+                let is_image = att
+                    .content_type
+                    .as_deref()
+                    .is_some_and(|ct| ct.starts_with("image/"));
+                if !is_image {
+                    continue;
+                }
+                if self.discord.image_protocols.contains_key(&att.id)
+                    || self.discord.image_downloading.contains(&att.id)
+                {
+                    continue;
+                }
+                if let Some(url) = &att.url {
+                    self.discord.image_downloading.insert(att.id.clone());
+                    to_download.push((att.id.clone(), url.clone()));
+                }
+            }
+        }
+        to_download
     }
 
     /// お気に入り設定を読み込み
@@ -257,13 +307,17 @@ impl AppState {
             }
 
             AppEvent::MessageCreate(message) => {
-                // メッセージを追加
+                let pending = self.collect_pending_image_downloads(std::slice::from_ref(&message));
                 self.discord
                     .messages
                     .entry(message.channel_id.clone())
                     .or_default()
                     .push(message);
-                Command::None
+                if pending.is_empty() {
+                    Command::None
+                } else {
+                    Command::DownloadImages(pending)
+                }
             }
 
             AppEvent::MessageUpdate(message) => {
@@ -289,7 +343,23 @@ impl AppState {
                 channel_id,
                 messages,
             } => {
+                let pending = self.collect_pending_image_downloads(&messages);
                 self.discord.messages.insert(channel_id, messages);
+                if pending.is_empty() {
+                    Command::None
+                } else {
+                    Command::DownloadImages(pending)
+                }
+            }
+
+            AppEvent::AttachmentImageLoaded { attachment_id, image } => {
+                self.discord.image_downloading.remove(&attachment_id);
+                if let Some(picker) = self.picker.as_mut() {
+                    let protocol = picker.new_resize_protocol(*image);
+                    self.discord
+                        .image_protocols
+                        .insert(attachment_id, protocol);
+                }
                 Command::None
             }
 

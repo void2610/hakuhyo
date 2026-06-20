@@ -17,6 +17,7 @@ use discord::{DiscordRestClient, GatewayClient, GatewayEvent};
 use events::AppEvent;
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui_image::picker::Picker;
 use std::io;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
@@ -59,13 +60,25 @@ async fn main() -> anyhow::Result<()> {
 
     // ターミナル初期化（認証完了後）
     enable_raw_mode()?;
+    // Picker は termios でフォントサイズを取得し、環境変数からプロトコルを推測
+    let picker = match Picker::from_termios() {
+        Ok(mut p) => {
+            let proto = p.guess_protocol();
+            log::info!("Image picker initialized: protocol={:?}", proto);
+            Some(p)
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize image picker: {} — image rendering disabled", e);
+            None
+        }
+    };
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     // アプリケーションを実行し、終了するまで待機
-    let result = run_app(&mut terminal, token).await;
+    let result = run_app(&mut terminal, token, picker).await;
 
     // ターミナル復元
     disable_raw_mode()?;
@@ -84,10 +97,12 @@ async fn main() -> anyhow::Result<()> {
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     token: String,
+    picker: Option<Picker>,
 ) -> anyhow::Result<()> {
     log::info!("Initializing application state");
 
     let mut app = AppState::new();
+    app.set_picker(picker);
 
     // 設定ファイルを読み込み
     if let Ok(config) = config::load_config() {
@@ -216,6 +231,40 @@ async fn run_app(
                             let _ = tx.send(AppEvent::MessageSent(message)).await;
                         }
                     });
+                }
+                Command::DownloadImages(items) => {
+                    for (att_id, url) in items {
+                        let tx2 = tx.clone();
+                        tokio::spawn(async move {
+                            log::debug!("Downloading image: id={}, url={}", att_id, url);
+                            match reqwest::get(&url).await {
+                                Ok(resp) => match resp.bytes().await {
+                                    Ok(bytes) => {
+                                        match tokio::task::spawn_blocking(move || {
+                                            image::load_from_memory(&bytes)
+                                        })
+                                        .await
+                                        {
+                                            Ok(Ok(img)) => {
+                                                let _ = tx2
+                                                    .send(AppEvent::AttachmentImageLoaded {
+                                                        attachment_id: att_id,
+                                                        image: Box::new(img),
+                                                    })
+                                                    .await;
+                                            }
+                                            Ok(Err(e)) => {
+                                                log::warn!("Failed to decode image: {}", e)
+                                            }
+                                            Err(e) => log::warn!("Decode task panicked: {}", e),
+                                        }
+                                    }
+                                    Err(e) => log::warn!("Failed to read image bytes: {}", e),
+                                },
+                                Err(e) => log::warn!("Failed to download image: {}", e),
+                            }
+                        });
+                    }
                 }
                 Command::OpenInDiscord { guild_id, channel_id } => {
                     // discord://-/channels/<guild_or_@me>/<channel_id>
