@@ -66,7 +66,7 @@ cargo run --release
 ### Normalモード
 
 | キー | 動作 |
-|------|------|
+| ------ | ------ |
 | `/` | 検索モードに切り替え |
 | `↑` / `k` | 上のチャンネルを選択 |
 | `↓` / `j` | 下のチャンネルを選択 |
@@ -78,7 +78,7 @@ cargo run --release
 ### Editingモード
 
 | キー | 動作 |
-|------|------|
+| ------ | ------ |
 | `Esc` | Normalモードに戻る |
 | `Enter` | メッセージ送信 |
 | `Backspace` | 文字削除 |
@@ -86,7 +86,7 @@ cargo run --release
 
 ## プロジェクト構造
 
-```
+```dir-tree
 hakuhyo/
 ├── Cargo.toml
 ├── README.md
