@@ -16,6 +16,10 @@ pub enum AppEvent {
     GatewayReady(serde_json::Value),
     /// ギルド作成（READY後の新規ギルド参加用）
     GuildCreate { guild: Guild, channels: Vec<Channel> },
+    /// スレッド作成 / 更新（フォーラム投稿含む）
+    ThreadUpsert(Channel),
+    /// スレッド削除 / アーカイブ
+    ThreadDelete { id: String },
     /// 新規メッセージ
     MessageCreate(Message),
     /// メッセージ更新

@@ -76,6 +76,8 @@ pub struct Channel {
     pub recipients: Option<Vec<User>>, // DM用（完全なユーザー情報）
     #[serde(default)]
     pub recipient_ids: Option<Vec<String>>, // DM用（ユーザーIDのみ、READYイベントで使用）
+    #[serde(default)]
+    pub parent_id: Option<String>, // スレッドの親チャンネル / カテゴリ
 }
 
 impl Channel {
@@ -97,11 +99,22 @@ impl Channel {
     /// チャンネルタイプのプレフィックスを取得
     pub fn type_prefix(&self) -> &str {
         match self.channel_type {
-            0 => "# ",  // テキストチャンネル
-            1 => "@ ",  // DM
-            2 => "🔊 ", // ボイスチャンネル
+            0 => "# ",        // テキストチャンネル
+            1 => "@ ",        // DM
+            2 => "🔊 ",       // ボイスチャンネル
+            3 => "@@ ",       // グループ DM
+            5 => "📢 ",       // アナウンスチャンネル
+            10 | 11 | 12 => "🧵 ", // スレッド
+            15 => "📋 ",      // フォーラム
+            16 => "🖼️ ",     // メディアチャンネル
             _ => "? ",
         }
+    }
+
+    /// メッセージのやり取りが可能なチャンネルかどうか
+    /// (DM/グループDM/テキスト/アナウンス/各種スレッド)
+    pub fn is_messageable(&self) -> bool {
+        matches!(self.channel_type, 0 | 1 | 3 | 5 | 10 | 11 | 12)
     }
 }
 

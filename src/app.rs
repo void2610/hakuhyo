@@ -129,17 +129,28 @@ impl AppState {
 
                             self.discord.guilds.insert(guild.id.clone(), guild.clone());
 
-                            // チャンネル情報を抽出
+                            // チャンネル情報を抽出（フォーラム/メディアの親解決のため全種類を保存し、
+                            // 表示・検索時に is_messageable() でフィルタする）
                             if let Some(channels_array) = guild_data.get("channels").and_then(|v| v.as_array()) {
                                 for channel_data in channels_array {
                                     if let Ok(mut channel) = serde_json::from_value::<crate::discord::Channel>(channel_data.clone()) {
-                                        // チャンネルにguild_idを設定
                                         channel.guild_id = Some(guild.id.clone());
+                                        self.discord.channels.insert(channel.id.clone(), channel);
+                                    }
+                                }
+                            }
 
-                                        // テキストチャンネル（type 0）のみ追加
-                                        if channel.channel_type == 0 {
-                                            self.discord.channels.insert(channel.id.clone(), channel);
-                                        }
+                            // スレッド情報を抽出（フォーラム投稿含む）
+                            // ユーザーアカウントの READY では guilds[].threads[] にアクティブなスレッドが入る
+                            if let Some(threads_array) = guild_data.get("threads").and_then(|v| v.as_array()) {
+                                for thread_data in threads_array {
+                                    if let Ok(mut thread) = serde_json::from_value::<crate::discord::Channel>(thread_data.clone()) {
+                                        thread.guild_id = Some(guild.id.clone());
+                                        log::debug!(
+                                            "Adding thread: id={}, type={}, name={:?}, parent_id={:?}",
+                                            thread.id, thread.channel_type, thread.name, thread.parent_id
+                                        );
+                                        self.discord.channels.insert(thread.id.clone(), thread);
                                     }
                                 }
                             }
@@ -227,6 +238,20 @@ impl AppState {
                     }
                 }
 
+                Command::None
+            }
+
+            AppEvent::ThreadUpsert(channel) => {
+                log::info!(
+                    "Thread upsert: id={}, name={:?}, parent={:?}",
+                    channel.id, channel.name, channel.parent_id
+                );
+                self.discord.channels.insert(channel.id.clone(), channel);
+                Command::None
+            }
+
+            AppEvent::ThreadDelete { id } => {
+                self.discord.channels.remove(&id);
                 Command::None
             }
 
@@ -444,9 +469,14 @@ impl AppState {
         Command::LoadMessages(channel_ids[new_index].clone())
     }
 
-    /// チャンネルリストを取得（ソート済み）
+    /// チャンネルリストを取得（ソート済み、メッセージ可能なもののみ）
     pub fn get_channel_list(&self) -> Vec<&Channel> {
-        let mut channels: Vec<&Channel> = self.discord.channels.values().collect();
+        let mut channels: Vec<&Channel> = self
+            .discord
+            .channels
+            .values()
+            .filter(|ch| ch.is_messageable())
+            .collect();
         channels.sort_by(|a, b| {
             // タイプでソート、次に名前でソート
             match a.channel_type.cmp(&b.channel_type) {
@@ -463,7 +493,7 @@ impl AppState {
             .discord
             .channels
             .values()
-            .filter(|ch| self.ui.favorites.contains(&ch.id))
+            .filter(|ch| ch.is_messageable() && self.ui.favorites.contains(&ch.id))
             .collect();
 
         favorites.sort_by(|a, b| {
@@ -490,6 +520,7 @@ impl AppState {
             .discord
             .channels
             .values()
+            .filter(|ch| ch.is_messageable())
             .filter(|ch| {
                 // チャンネル名で検索
                 let display_name = ch.display_name();
@@ -506,7 +537,15 @@ impl AppState {
                     false
                 };
 
-                let matched = name_match || guild_match;
+                // 親チャンネル名(フォーラム名等)で検索
+                let parent_match = ch
+                    .parent_id
+                    .as_ref()
+                    .and_then(|pid| self.discord.channels.get(pid))
+                    .map(|p| p.display_name().to_lowercase().contains(&query_lower))
+                    .unwrap_or(false);
+
+                let matched = name_match || guild_match || parent_match;
                 if matched {
                     log::debug!(
                         "Matched channel: {} (type={}, guild_id={:?})",

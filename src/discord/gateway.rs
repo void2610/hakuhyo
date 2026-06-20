@@ -418,18 +418,49 @@ impl GatewayClient {
                             if channel.guild_id.is_none() {
                                 channel.guild_id = Some(guild_id.clone());
                             }
+                            // フォーラム親解決のため全種類を渡し、表示側でフィルタする
+                            channel_list.push(channel);
+                        }
+                    }
 
-                            // テキストチャンネル（type 0）のみ追加
-                            if channel.channel_type == 0 {
-                                channel_list.push(channel);
+                    // GUILD_CREATE にもアクティブなスレッドが含まれる
+                    if let Some(threads) = data.get("threads").and_then(|v| v.as_array()) {
+                        for thread_data in threads {
+                            if let Ok(mut thread) = serde_json::from_value::<models::Channel>(thread_data.clone()) {
+                                if thread.guild_id.is_none() {
+                                    thread.guild_id = Some(guild_id.clone());
+                                }
+                                channel_list.push(thread);
                             }
                         }
                     }
 
-                    log::info!("GUILD_CREATE: loaded {} text channels for guild: {}", channel_list.len(), guild.name);
+                    log::info!("GUILD_CREATE: loaded {} channels/threads for guild: {}", channel_list.len(), guild.name);
                     Some(GatewayEvent::GuildCreate { guild, channels: channel_list })
                 })();
 
+                match result {
+                    Some(event) => MessageResult::Event(event),
+                    None => MessageResult::Ignore,
+                }
+            }
+            "THREAD_CREATE" | "THREAD_UPDATE" => {
+                match serde_json::from_value::<models::Channel>(data) {
+                    Ok(channel) if channel.is_messageable() => {
+                        log::info!(
+                            "{}: id={}, name={:?}, parent_id={:?}",
+                            event_type, channel.id, channel.name, channel.parent_id
+                        );
+                        MessageResult::Event(GatewayEvent::ThreadUpsert(channel))
+                    }
+                    _ => MessageResult::Ignore,
+                }
+            }
+            "THREAD_DELETE" => {
+                let result = (|| {
+                    let id = data.get("id")?.as_str()?.to_string();
+                    Some(GatewayEvent::ThreadDelete { id })
+                })();
                 match result {
                     Some(event) => MessageResult::Event(event),
                     None => MessageResult::Ignore,
@@ -464,6 +495,8 @@ impl GatewayClient {
 pub enum GatewayEvent {
     Ready(serde_json::Value),  // READY イベント全体（ギルド情報含む）
     GuildCreate { guild: models::Guild, channels: Vec<models::Channel> },
+    ThreadUpsert(models::Channel),
+    ThreadDelete { id: String },
     MessageCreate(models::Message),
     MessageUpdate(models::Message),
     MessageDelete { id: String, channel_id: String },

@@ -119,6 +119,8 @@ async fn run_app(
                             log::info!("New guild joined: {} ({})", guild.name, guild.id);
                             AppEvent::GuildCreate { guild, channels }
                         }
+                        GatewayEvent::ThreadUpsert(channel) => AppEvent::ThreadUpsert(channel),
+                        GatewayEvent::ThreadDelete { id } => AppEvent::ThreadDelete { id },
                         GatewayEvent::MessageCreate(msg) => AppEvent::MessageCreate(msg),
                         GatewayEvent::MessageUpdate(msg) => AppEvent::MessageUpdate(msg),
                         GatewayEvent::MessageDelete { id, channel_id } => {

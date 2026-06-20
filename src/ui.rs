@@ -81,10 +81,18 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                 String::new()
             };
 
+            // スレッドの場合は親チャンネル名を併記
+            let parent_name = channel
+                .parent_id
+                .as_ref()
+                .and_then(|pid| app.discord.channels.get(pid))
+                .map(|parent| format!("{} > ", parent.display_name()))
+                .unwrap_or_default();
+
             // お気に入りマークを追加
             let favorite_mark = "⭐ ";
 
-            let content = format!("{}{}{}{}", favorite_mark, guild_name, prefix, name);
+            let content = format!("{}{}{}{}{}", favorite_mark, guild_name, parent_name, prefix, name);
 
             let style = if Some(&channel.id) == app.ui.selected_channel.as_ref() {
                 Style::default()
@@ -336,6 +344,14 @@ fn render_search_overlay(frame: &mut Frame, app: &mut AppState) {
                 String::new()
             };
 
+            // スレッドの場合は親チャンネル名を併記
+            let parent_name = channel
+                .parent_id
+                .as_ref()
+                .and_then(|pid| app.discord.channels.get(pid))
+                .map(|parent| format!("{} > ", parent.display_name()))
+                .unwrap_or_default();
+
             // お気に入りマークを追加
             let favorite_mark = if app.ui.favorites.contains(&channel.id) {
                 "⭐ "
@@ -343,7 +359,7 @@ fn render_search_overlay(frame: &mut Frame, app: &mut AppState) {
                 ""
             };
 
-            let content = format!("{}{}{}{}", favorite_mark, guild_name, prefix, name);
+            let content = format!("{}{}{}{}{}", favorite_mark, guild_name, parent_name, prefix, name);
 
             ListItem::new(content)
         })
