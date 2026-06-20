@@ -24,8 +24,12 @@ pub struct DiscordState {
     pub users: HashMap<String, User>,            // user_id -> user (DM表示用)
     pub current_user: Option<User>,
     pub connected: bool,
-    /// attachment_id -> 描画用プロトコル
-    pub image_protocols: HashMap<String, BoxedImageProtocol>,
+    /// attachment_id -> 描画用プロトコル (キャッシュキーは area_w_cells)
+    pub image_protocols: HashMap<String, (u16, BoxedImageProtocol)>,
+    /// attachment_id -> area_w に合わせてリサイズ済みの画像 (部分描画クロップ用)
+    pub image_resized: HashMap<String, (u16, image::DynamicImage)>,
+    /// attachment_id -> 元画像 (リサイズの再生成元)
+    pub image_sources: HashMap<String, image::DynamicImage>,
     /// ダウンロード中の attachment_id
     pub image_downloading: HashSet<String>,
 }
@@ -42,6 +46,8 @@ pub struct UiState {
     pub favorites: HashSet<String>,     // お気に入りチャンネルID
     pub search_mode: bool,               // 検索モードフラグ
     pub search_buffer: String,           // 検索クエリ
+    // メッセージリストのスクロール位置 (最新基準のオフセット件数)
+    pub message_scroll_offset: usize,
 }
 
 /// 入力モード
@@ -74,6 +80,8 @@ impl AppState {
                 current_user: None,
                 connected: false,
                 image_protocols: HashMap::new(),
+                image_resized: HashMap::new(),
+                image_sources: HashMap::new(),
                 image_downloading: HashSet::new(),
             },
             ui: UiState {
@@ -85,6 +93,7 @@ impl AppState {
                 favorites: HashSet::new(),
                 search_mode: false,
                 search_buffer: String::new(),
+                message_scroll_offset: 0,
             },
             picker: None,
         }
@@ -354,18 +363,20 @@ impl AppState {
 
             AppEvent::AttachmentImageLoaded { attachment_id, image } => {
                 self.discord.image_downloading.remove(&attachment_id);
-                if let Some(picker) = self.picker.as_mut() {
-                    let protocol = picker.new_resize_protocol(*image);
-                    self.discord
-                        .image_protocols
-                        .insert(attachment_id, protocol);
-                }
+                // protocol / resized キャッシュは描画時に area_w が判明してから生成する
+                self.discord.image_sources.insert(attachment_id, *image);
                 Command::None
             }
 
             AppEvent::MessageSent(message) => {
                 // メッセージ送信後にメッセージリストを再読み込みして最新の状態を取得
+                self.ui.message_scroll_offset = 0;
                 Command::LoadMessages(message.channel_id)
+            }
+
+            AppEvent::ScrollMessages(delta) => {
+                self.apply_scroll(delta);
+                Command::None
             }
 
             // UI イベント
@@ -401,6 +412,7 @@ impl AppState {
                 KeyCode::Enter => {
                     // チャンネル選択確定して検索モードを終了
                     self.toggle_search_mode();
+                    self.ui.message_scroll_offset = 0;
                     if let Some(channel_id) = &self.ui.selected_channel {
                         Command::LoadMessages(channel_id.clone())
                     } else {
@@ -433,6 +445,14 @@ impl AppState {
                     self.toggle_favorite();
                     Command::None
                 }
+                KeyCode::Char('e') => {
+                    self.apply_scroll(1);
+                    Command::None
+                }
+                KeyCode::Char('d') => {
+                    self.apply_scroll(-1);
+                    Command::None
+                }
                 KeyCode::Char('o') => {
                     // 現在のチャンネルを Discord アプリで開く
                     if let Some(channel_id) = &self.ui.selected_channel {
@@ -453,6 +473,7 @@ impl AppState {
                 KeyCode::Down | KeyCode::Char('j') => self.select_next_channel(),
                 KeyCode::Enter => {
                     // チャンネル選択確定
+                    self.ui.message_scroll_offset = 0;
                     if let Some(channel_id) = &self.ui.selected_channel {
                         Command::LoadMessages(channel_id.clone())
                     } else {
@@ -525,6 +546,7 @@ impl AppState {
 
         self.ui.channel_list_state.select(Some(new_index));
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
+        self.ui.message_scroll_offset = 0;
 
         // チャンネル切り替え時に自動的にメッセージを読み込む
         Command::LoadMessages(channel_ids[new_index].clone())
@@ -551,9 +573,23 @@ impl AppState {
 
         self.ui.channel_list_state.select(Some(new_index));
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
+        self.ui.message_scroll_offset = 0;
 
         // チャンネル切り替え時に自動的にメッセージを読み込む
         Command::LoadMessages(channel_ids[new_index].clone())
+    }
+
+    /// メッセージリストを行単位でスクロール (正: 古い側 / 負: 新しい側)。
+    /// 上限のクランプはレイアウト依存のため ui.rs 側で行う。
+    fn apply_scroll(&mut self, delta: i32) {
+        if delta > 0 {
+            self.ui.message_scroll_offset =
+                self.ui.message_scroll_offset.saturating_add(delta as usize);
+        } else if delta < 0 {
+            self.ui.message_scroll_offset =
+                self.ui.message_scroll_offset.saturating_sub((-delta) as usize);
+        }
+        log::debug!("Scroll offset: {}", self.ui.message_scroll_offset);
     }
 
     /// チャンネルリストを取得（ソート済み、メッセージ可能なもののみ）

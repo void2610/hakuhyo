@@ -9,6 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
+use ratatui_image::picker::Picker;
 use ratatui_image::StatefulImage;
 
 /// TUIを描画
@@ -178,77 +179,233 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         return;
     }
 
-    // 1メッセージあたりの画像表示高さ (セル単位)
-    const IMAGE_HEIGHT: u16 = 10;
+    // 画像高さ計算用のセル寸法 (1セルあたりピクセル数)。Picker 未取得時は妥当なデフォルト
+    let (cell_w_px, cell_h_px) = app
+        .picker
+        .as_ref()
+        .map(|p| p.font_size)
+        .unwrap_or((10, 20));
 
-    // 各メッセージの高さと、表示する画像 attachment_id を最新→古い順で計算
-    let mut visible: Vec<(Message, u16, Option<String>)> = Vec::new();
-    let mut total: u16 = 0;
-    for msg in messages.iter().rev() {
-        let image_att_id = msg
-            .attachments
-            .iter()
-            .find(|a| {
-                a.content_type
-                    .as_deref()
-                    .is_some_and(|ct| ct.starts_with("image/"))
-                    && app.discord.image_protocols.contains_key(&a.id)
-            })
-            .map(|a| a.id.clone());
-        let h: u16 = if image_att_id.is_some() {
-            1 + IMAGE_HEIGHT
-        } else {
-            1
-        };
-        if total.saturating_add(h) > inner.height {
-            break;
+    // 画像セル高さの上下限
+    const IMAGE_MIN_H: u16 = 3;
+    const IMAGE_MAX_H: u16 = 24;
+    const IMAGE_FALLBACK_H: u16 = 10;
+
+    let area_w = inner.width;
+    let inner_top = inner.y as i32;
+    let inner_bottom = inner_top + inner.height as i32;
+
+    // 元画像のサイズから、アスペクトを保ったリサイズ後 (target_w_px, target_h_px) と表示セル高さを算出
+    let calc_dims = |orig_w: u32, orig_h: u32| -> Option<(u16, u32, u32)> {
+        if orig_w == 0 || orig_h == 0 || area_w == 0 || cell_w_px == 0 || cell_h_px == 0 {
+            return None;
         }
-        total += h;
-        visible.push((msg.clone(), h, image_att_id));
-    }
-    // 古い→新しい順に並べ替え
-    visible.reverse();
-
-    // 上部余白 + 各メッセージで縦 Layout
-    let mut constraints: Vec<Constraint> = Vec::with_capacity(visible.len() + 1);
-    constraints.push(Constraint::Min(0));
-    for (_, h, _) in &visible {
-        constraints.push(Constraint::Length(*h));
-    }
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(inner);
-
-    for (idx, (msg, _, img_id)) in visible.iter().enumerate() {
-        let chunk = chunks[idx + 1];
-
-        // 1 行目: テキスト
-        let text_area = Rect {
-            x: chunk.x,
-            y: chunk.y,
-            width: chunk.width,
-            height: 1.min(chunk.height),
+        let area_w_px = (area_w as u32).saturating_mul(cell_w_px as u32);
+        let max_h_px = (IMAGE_MAX_H as u32).saturating_mul(cell_h_px as u32);
+        // 幅基準のアスペクト保持リサイズ
+        let h_by_width_px =
+            (orig_h as u64 * area_w_px as u64 / orig_w as u64).min(u32::MAX as u64) as u32;
+        let (target_w_px, target_h_px) = if h_by_width_px > max_h_px {
+            // 縦長で MAX_H 超過 → 高さ基準で抑え、幅は < area_w_px に
+            let target_h = max_h_px;
+            let target_w =
+                (orig_w as u64 * target_h as u64 / orig_h as u64).min(u32::MAX as u64) as u32;
+            (target_w, target_h)
+        } else {
+            (area_w_px, h_by_width_px)
         };
-        let line = build_message_line(msg);
-        frame.render_widget(Paragraph::new(line), text_area);
+        // ratatui-image の ImageSource.desired は ceil() で算出されるため、こちらも ceil で揃える
+        // (round だと target_h_px = 340px などで desired=22 / cells=21 のズレが生じて再リサイズが走る)
+        let cells = ((target_h_px as f32 / cell_h_px as f32).ceil() as u16)
+            .clamp(IMAGE_MIN_H, IMAGE_MAX_H);
+        Some((cells, target_w_px, target_h_px))
+    };
 
-        // 2 行目以降: 画像
-        if let Some(att_id) = img_id {
-            if chunk.height > 1 {
-                let img_area = Rect {
-                    x: chunk.x,
-                    y: chunk.y + 1,
-                    width: chunk.width,
-                    height: chunk.height - 1,
-                };
-                if let Some(protocol) = app.discord.image_protocols.get_mut(att_id) {
-                    let widget = StatefulImage::new(None);
-                    frame.render_stateful_widget(widget, img_area, protocol);
+    // 全メッセージの (msg, 総高さ, 画像リスト) を最新→古い順で計算
+    type MessageImages = Vec<(String, u16)>;
+    let entries: Vec<(Message, u16, MessageImages)> = messages
+        .iter()
+        .map(|msg| {
+            let images: MessageImages = msg
+                .attachments
+                .iter()
+                .filter(|a| {
+                    a.content_type
+                        .as_deref()
+                        .is_some_and(|ct| ct.starts_with("image/"))
+                        && app.discord.image_sources.contains_key(&a.id)
+                })
+                .map(|a| {
+                    let (ow, oh) = if let Some(src) = app.discord.image_sources.get(&a.id) {
+                        (src.width(), src.height())
+                    } else {
+                        (a.width.unwrap_or(0), a.height.unwrap_or(0))
+                    };
+                    let cells = calc_dims(ow, oh)
+                        .map(|(c, _, _)| c)
+                        .unwrap_or(IMAGE_FALLBACK_H);
+                    (a.id.clone(), cells)
+                })
+                .collect();
+            let h: u16 = 1u16.saturating_add(images.iter().map(|(_, c)| *c).sum::<u16>());
+            (msg.clone(), h, images)
+        })
+        .collect();
+
+    // 画像キャッシュを area_w に合わせて準備 (アスペクトは保持してリサイズ)
+    {
+        let sources = &app.discord.image_sources;
+        let protocols = &mut app.discord.image_protocols;
+        let resized_cache = &mut app.discord.image_resized;
+        if let Some(picker) = app.picker.as_mut() {
+            for (_, _, imgs) in entries.iter() {
+                for (att_id, _) in imgs {
+                    let cached_w = protocols.get(att_id).map(|(w, _)| *w);
+                    if cached_w == Some(area_w) {
+                        continue;
+                    }
+                    let Some(source) = sources.get(att_id) else {
+                        continue;
+                    };
+                    let Some((_, target_w_px, target_h_px)) =
+                        calc_dims(source.width(), source.height())
+                    else {
+                        continue;
+                    };
+                    if target_w_px == 0 || target_h_px == 0 {
+                        continue;
+                    }
+                    let resized = source.resize_exact(
+                        target_w_px,
+                        target_h_px,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    let protocol = picker.new_resize_protocol(resized.clone());
+                    protocols.insert(att_id.clone(), (area_w, protocol));
+                    resized_cache.insert(att_id.clone(), (area_w, resized));
                 }
             }
         }
     }
+
+    // 全体高さからスクロール offset の上限を決めてクランプ
+    let total_height: u32 = entries.iter().map(|(_, h, _)| *h as u32).sum();
+    let max_offset = total_height.saturating_sub(inner.height as u32) as usize;
+    let scroll_offset = app.ui.message_scroll_offset.min(max_offset);
+    app.ui.message_scroll_offset = scroll_offset; // 過剰な offset をクランプして書き戻す
+
+    // 最新メッセージの底辺 y を求める。offset 0 で inner 下端ぴったり、offset>0 で下に押し下げる
+    let mut y_bottom: i32 = inner_bottom + scroll_offset as i32;
+
+    for (msg, h, images) in entries.iter() {
+        let y_top = y_bottom - *h as i32;
+
+        // 画面下端より下にメッセージ全体がある場合 (offset 大きすぎ等) → skip して次へ
+        if y_top >= inner_bottom {
+            y_bottom = y_top;
+            continue;
+        }
+        // 画面上端より上にメッセージ全体が抜けたら、これより古いメッセージは描画不要
+        if y_bottom <= inner_top {
+            break;
+        }
+
+        // テキスト行 (画面内なら描画)
+        if y_top >= inner_top && y_top < inner_bottom {
+            let text_area = Rect {
+                x: inner.x,
+                y: y_top as u16,
+                width: inner.width,
+                height: 1,
+            };
+            let line = build_message_line(msg);
+            frame.render_widget(Paragraph::new(line), text_area);
+        }
+
+        // 画像領域 (テキストの 1 行下から)
+        let mut img_y = y_top + 1;
+        for (att_id, img_h) in images {
+            let img_top = img_y;
+            let img_bottom = img_top + *img_h as i32;
+
+            // 完全に画面外
+            if img_bottom <= inner_top || img_top >= inner_bottom {
+                img_y = img_bottom;
+                continue;
+            }
+
+            let visible_top = img_top.max(inner_top);
+            let visible_bottom = img_bottom.min(inner_bottom);
+            let visible_h = (visible_bottom - visible_top) as u16;
+            let img_area = Rect {
+                x: inner.x,
+                y: visible_top as u16,
+                width: inner.width,
+                height: visible_h,
+            };
+
+            let hidden_top_cells = (visible_top - img_top) as u32;
+            let hidden_bottom_cells = (img_bottom - visible_bottom) as u32;
+            let partial = hidden_top_cells > 0 || hidden_bottom_cells > 0;
+
+            if !partial {
+                // 完全表示: キャッシュ済みプロトコルを使用 (area_w に揃ったリサイズ済み画像)
+                if let Some((_, protocol)) = app.discord.image_protocols.get_mut(att_id) {
+                    let widget = StatefulImage::new(None);
+                    frame.render_stateful_widget(widget, img_area, protocol);
+                }
+            } else if let Some((_, resized)) = app.discord.image_resized.get(att_id) {
+                if let Some(picker) = app.picker.as_mut() {
+                    render_partial_image(
+                        frame,
+                        picker,
+                        resized,
+                        img_area,
+                        hidden_top_cells,
+                        visible_h as u32,
+                        *img_h as u32,
+                    );
+                }
+            }
+
+            img_y = img_bottom;
+        }
+
+        y_bottom = y_top;
+    }
+}
+
+/// アスペクト保持で resize 済みの画像から、cell 比率に従ってクロップして描画する。
+/// クロップ量を「画像ピクセル × visible_cells / img_h_cells」で計算することで、
+/// 完全表示時のratatui-image内部の余白量と同比率になり、見た目の縮率が一致する。
+fn render_partial_image(
+    frame: &mut Frame,
+    picker: &mut Picker,
+    resized: &image::DynamicImage,
+    area: Rect,
+    hidden_top_cells: u32,
+    visible_cells: u32,
+    img_h_cells: u32,
+) {
+    if visible_cells == 0 || img_h_cells == 0 {
+        return;
+    }
+    let w = resized.width();
+    let h = resized.height();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let crop_y =
+        ((hidden_top_cells as u64 * h as u64) / img_h_cells as u64).min(h as u64) as u32;
+    let crop_h_raw = (visible_cells as u64 * h as u64) / img_h_cells as u64;
+    let crop_h = (crop_h_raw as u32).min(h.saturating_sub(crop_y));
+    if crop_h == 0 {
+        return;
+    }
+    let cropped = resized.crop_imm(0, crop_y, w, crop_h);
+    let mut protocol = picker.new_resize_protocol(cropped);
+    let widget = StatefulImage::new(None);
+    frame.render_stateful_widget(widget, area, &mut protocol);
 }
 
 /// 1メッセージ分のテキスト行を構築
@@ -340,7 +497,7 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: ratatui::layou
     } else {
         match app.ui.input_mode {
             InputMode::Normal => {
-                Span::raw(" q: Quit | i: Edit | /: Search | f: Favorite | o: Open in Discord | ↑/k: Up | ↓/j: Down ")
+                Span::raw(" q: Quit | i: Edit | /: Search | f: Fav | o: Open | e/^U: ScrollUp | d/^D: ScrollDown | ↑/k ↓/j ")
             }
             InputMode::Editing => Span::raw(" Esc: Normal mode | Enter: Send message "),
         }

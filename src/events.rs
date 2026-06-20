@@ -36,6 +36,8 @@ pub enum AppEvent {
     },
     /// メッセージ送信完了
     MessageSent(Message),
+    /// メッセージリストを行単位でスクロール (正: 古い側へ / 負: 新しい側へ)
+    ScrollMessages(i32),
     /// 画像添付ファイルのデコード完了 (DynamicImage は重いので Box で包む)
     AttachmentImageLoaded {
         attachment_id: String,

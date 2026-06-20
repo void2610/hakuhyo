@@ -166,6 +166,24 @@ async fn run_app(
                         let _ = ui_event_tx.send(AppEvent::Quit).await;
                         break;
                     }
+                    // Ctrl+U / Ctrl+D でメッセージを大きめにスクロール (行単位)
+                    if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key_event.code {
+                            KeyCode::Char('u') => {
+                                let _ = ui_event_tx
+                                    .send(AppEvent::ScrollMessages(10))
+                                    .await;
+                                continue;
+                            }
+                            KeyCode::Char('d') => {
+                                let _ = ui_event_tx
+                                    .send(AppEvent::ScrollMessages(-10))
+                                    .await;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     // 'q' で終了（Normal モード時のみ）
                     if key_event.code == KeyCode::Char('q') {
                         let _ = ui_event_tx.send(AppEvent::Quit).await;
