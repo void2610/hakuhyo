@@ -197,14 +197,18 @@ async fn run_app(
         }
     });
 
-    // 描画タイマー
+    // 描画タイマー (バッファ満杯時は drop して他イベントの処理遅延を防ぐ)
     let tick_tx = event_tx.clone();
     tokio::spawn(async move {
         let mut tick_interval = interval(Duration::from_millis(100));
         loop {
             tick_interval.tick().await;
-            if tick_tx.send(AppEvent::Tick).await.is_err() {
-                break;
+            match tick_tx.try_send(AppEvent::Tick) {
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // バッファ満杯なら Tick を捨てて、MessageCreate などの優先イベントに譲る
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
             }
         }
     });
