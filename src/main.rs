@@ -13,7 +13,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use discord::{DiscordRestClient, GatewayClient, GatewayEvent};
+use discord::{DiscordRestClient, GatewayClient, GatewayEvent, RestError};
 use events::AppEvent;
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -267,8 +267,17 @@ fn dispatch_command(
                     }
                     Err(e) => {
                         log::warn!("LoadMessages failed for {}: {}", channel_id, e);
+                        // 4xx (429 を除く) のみ恒久的エラー扱い。429 / 5xx / ネットワーク
+                        // エラーは一時的なので inaccessible に入れない。
+                        let permanent = matches!(
+                            e,
+                            RestError::Http { status, .. } if (400..500).contains(&status) && status != 429
+                        );
                         let _ = tx
-                            .send(AppEvent::MessagesLoadFailed { channel_id })
+                            .send(AppEvent::MessagesLoadFailed {
+                                channel_id,
+                                permanent,
+                            })
                             .await;
                     }
                 }

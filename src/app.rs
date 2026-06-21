@@ -477,8 +477,13 @@ impl AppState {
                 }
             }
 
-            AppEvent::MessagesLoadFailed { channel_id } => {
-                self.discord.inaccessible_channels.insert(channel_id);
+            AppEvent::MessagesLoadFailed {
+                channel_id,
+                permanent,
+            } => {
+                if permanent {
+                    self.discord.inaccessible_channels.insert(channel_id);
+                }
                 Command::None
             }
 

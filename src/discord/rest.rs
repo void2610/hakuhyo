@@ -3,6 +3,29 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use std::time::Duration;
 
+/// `get_messages` 用のエラー型。HTTP status を取り出して呼び出し側で
+/// 一時エラーと永続エラーを区別できるようにする。
+#[derive(Debug)]
+pub enum RestError {
+    /// HTTP 応答エラー (4xx / 5xx)
+    Http { status: u16, body: String },
+    /// 送信失敗やネットワークエラー等
+    Network(anyhow::Error),
+}
+
+impl std::fmt::Display for RestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestError::Http { status, body } => {
+                write!(f, "HTTP {} - {}", status, body)
+            }
+            RestError::Network(e) => write!(f, "network error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for RestError {}
+
 const API_BASE: &str = "https://discord.com/api/v10";
 
 /// Discord REST API クライアント
@@ -23,14 +46,15 @@ impl DiscordRestClient {
         Self { client, token }
     }
 
-    /// チャンネルのメッセージを取得
+    /// チャンネルのメッセージを取得。失敗時は HTTP status を含む構造化エラーを返す
+    /// (呼び出し側で 4xx/5xx/ネットワークの違いを判別するため)。
     /// `before` を指定すると、その message_id より古いものを返す
     pub async fn get_messages(
         &self,
         channel_id: &str,
         limit: u8,
         before: Option<&str>,
-    ) -> Result<Vec<Message>> {
+    ) -> std::result::Result<Vec<Message>, RestError> {
         let mut url = format!(
             "{}/channels/{}/messages?limit={}",
             API_BASE,
@@ -40,7 +64,28 @@ impl DiscordRestClient {
         if let Some(before_id) = before {
             url.push_str(&format!("&before={}", before_id));
         }
-        self.get(&url).await
+        // レート制限対策: 最小間隔を設ける
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", self.token.clone())
+            .header("User-Agent", "Hakuhyo/1.0")
+            .send()
+            .await
+            .map_err(|e| RestError::Network(anyhow::Error::new(e)))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RestError::Http {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        response
+            .json::<Vec<Message>>()
+            .await
+            .map_err(|e| RestError::Network(anyhow::Error::new(e).context("Failed to parse messages JSON")))
     }
 
     /// メッセージを送信
