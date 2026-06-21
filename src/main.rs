@@ -279,31 +279,44 @@ async fn run_app(
                         let tx2 = tx.clone();
                         tokio::spawn(async move {
                             log::debug!("Downloading image: id={}, url={}", att_id, url);
-                            match reqwest::get(&url).await {
-                                Ok(resp) => match resp.bytes().await {
-                                    Ok(bytes) => {
-                                        match tokio::task::spawn_blocking(move || {
-                                            image::load_from_memory(&bytes)
-                                        })
-                                        .await
-                                        {
-                                            Ok(Ok(img)) => {
-                                                let _ = tx2
-                                                    .send(AppEvent::AttachmentImageLoaded {
-                                                        attachment_id: att_id,
-                                                        image: Box::new(img),
-                                                    })
-                                                    .await;
+                            // 任意の段階で失敗したら Failed を送って image_downloading を必ず解除する
+                            let result: Result<image::DynamicImage, String> =
+                                match reqwest::get(&url).await {
+                                    Ok(resp) => match resp.bytes().await {
+                                        Ok(bytes) => {
+                                            match tokio::task::spawn_blocking(move || {
+                                                image::load_from_memory(&bytes)
+                                            })
+                                            .await
+                                            {
+                                                Ok(Ok(img)) => Ok(img),
+                                                Ok(Err(e)) => {
+                                                    Err(format!("decode failed: {}", e))
+                                                }
+                                                Err(e) => Err(format!("decode task panic: {}", e)),
                                             }
-                                            Ok(Err(e)) => {
-                                                log::warn!("Failed to decode image: {}", e)
-                                            }
-                                            Err(e) => log::warn!("Decode task panicked: {}", e),
                                         }
-                                    }
-                                    Err(e) => log::warn!("Failed to read image bytes: {}", e),
-                                },
-                                Err(e) => log::warn!("Failed to download image: {}", e),
+                                        Err(e) => Err(format!("read bytes failed: {}", e)),
+                                    },
+                                    Err(e) => Err(format!("download failed: {}", e)),
+                                };
+                            match result {
+                                Ok(img) => {
+                                    let _ = tx2
+                                        .send(AppEvent::AttachmentImageLoaded {
+                                            attachment_id: att_id,
+                                            image: Box::new(img),
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    log::warn!("Image fetch error ({}): {}", att_id, e);
+                                    let _ = tx2
+                                        .send(AppEvent::AttachmentImageFailed {
+                                            attachment_id: att_id,
+                                        })
+                                        .await;
+                                }
                             }
                         });
                     }

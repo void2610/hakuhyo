@@ -376,6 +376,10 @@ impl AppState {
                 self.discord.image_sources.insert(attachment_id, *image);
                 Command::None
             }
+            AppEvent::AttachmentImageFailed { attachment_id } => {
+                self.discord.image_downloading.remove(&attachment_id);
+                Command::None
+            }
 
             AppEvent::MessageSent(message) => {
                 // メッセージ送信後にメッセージリストを再読み込みして最新の状態を取得

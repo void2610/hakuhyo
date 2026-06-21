@@ -48,6 +48,8 @@ pub enum AppEvent {
         attachment_id: String,
         image: Box<image::DynamicImage>,
     },
+    /// 画像添付ファイルのダウンロード/デコード失敗 (再試行可能にするためロック解除用)
+    AttachmentImageFailed { attachment_id: String },
 
     // システムイベント
     /// 定期的な描画更新
