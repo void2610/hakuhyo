@@ -14,6 +14,8 @@ pub struct AppState {
     pub ui: UiState,
     /// 画像表示用 Picker (起動時にターミナル能力を問い合わせて作成)
     pub picker: Option<Picker>,
+    /// ターミナル背景色 (透明 PNG のアルファ合成用)
+    pub bg_color: [u8; 3],
 }
 
 /// Discord関連の状態
@@ -66,6 +68,10 @@ pub struct DiscordState {
     pub unread_cache: Vec<String>,
     /// 未読関連の状態が変わったかどうか (true なら次の描画前に再計算)
     pub unread_cache_dirty: bool,
+    /// emoji_id -> 描画用プロトコル
+    pub emoji_protocols: HashMap<String, BoxedImageProtocol>,
+    /// ダウンロード中の emoji_id (重複防止)
+    pub emoji_downloading: HashSet<String>,
 }
 
 /// UI関連の状態
@@ -117,6 +123,8 @@ pub enum Command {
     OpenInDiscord { guild_id: Option<String>, channel_id: String },
     /// 画像添付ファイルのダウンロード (attachment_id, url)
     DownloadImages(Vec<(String, String)>),
+    /// カスタム絵文字のダウンロード (emoji_id, url)
+    DownloadEmojis(Vec<(String, String)>),
     /// チャンネルの最新メッセージを既読化 (公式クライアントにも反映)
     AckChannel { channel_id: String, message_id: String },
     /// 複数 Command を一括発火 (例: 画像ダウンロード + ack)
@@ -150,6 +158,8 @@ impl AppState {
                 session_unread: HashSet::new(),
                 unread_cache: Vec::new(),
                 unread_cache_dirty: true,
+                emoji_protocols: HashMap::new(),
+                emoji_downloading: HashSet::new(),
             },
             ui: UiState {
                 selected_channel: None,
@@ -166,12 +176,43 @@ impl AppState {
                 unread_boundaries: HashMap::new(),
             },
             picker: None,
+            bg_color: [28, 28, 32],
         }
     }
 
     /// 描画用 Picker を設定
     pub fn set_picker(&mut self, picker: Option<Picker>) {
         self.picker = picker;
+    }
+
+    /// ターミナル背景色を設定 (透明 PNG のアルファ合成に使う)
+    pub fn set_bg_color(&mut self, bg: [u8; 3]) {
+        self.bg_color = bg;
+    }
+
+    /// メッセージ群からカスタム絵文字 ID を抽出し、未取得/未進行のものをキューに入れる。
+    /// 返り値はダウンロード対象 (emoji_id, url) のリスト。
+    fn collect_pending_emoji_downloads(&mut self, messages: &[Message]) -> Vec<(String, String)> {
+        let mut to_download = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for msg in messages {
+            for seg in crate::emoji::parse_message_segments(&msg.content) {
+                if let crate::emoji::MessageSegment::Emoji { id, .. } = seg {
+                    if seen.contains(&id) {
+                        continue;
+                    }
+                    seen.insert(id.clone());
+                    if self.discord.emoji_protocols.contains_key(&id)
+                        || self.discord.emoji_downloading.contains(&id)
+                    {
+                        continue;
+                    }
+                    self.discord.emoji_downloading.insert(id.clone());
+                    to_download.push((id.clone(), crate::emoji::emoji_cdn_url(&id)));
+                }
+            }
+        }
+        to_download
     }
 
     /// メッセージ内の画像 attachment のうち、まだ未ダウンロード/未進行のものをキューに入れる。
@@ -430,7 +471,9 @@ impl AppState {
             }
 
             AppEvent::MessageCreate(message) => {
-                let pending = self.collect_pending_image_downloads(std::slice::from_ref(&message));
+                let img_pending = self.collect_pending_image_downloads(std::slice::from_ref(&message));
+                let emoji_pending =
+                    self.collect_pending_emoji_downloads(std::slice::from_ref(&message));
                 // 該当チャンネルの last_message_id を更新 (未読判定用)
                 if let Some(channel) = self.discord.channels.get_mut(&message.channel_id) {
                     channel.last_message_id = Some(message.id.clone());
@@ -447,11 +490,7 @@ impl AppState {
                     .entry(message.channel_id.clone())
                     .or_default()
                     .push(message);
-                if pending.is_empty() {
-                    Command::None
-                } else {
-                    Command::DownloadImages(pending)
-                }
+                batch_commands(img_pending, emoji_pending)
             }
 
             AppEvent::MessageUpdate(message) => {
@@ -492,13 +531,10 @@ impl AppState {
                     self.discord.inaccessible_channels.insert(channel_id.clone());
                     self.invalidate_unread_cache();
                 }
-                let pending = self.collect_pending_image_downloads(&messages);
+                let img_pending = self.collect_pending_image_downloads(&messages);
+                let emoji_pending = self.collect_pending_emoji_downloads(&messages);
                 self.discord.messages.insert(channel_id, messages);
-                if pending.is_empty() {
-                    Command::None
-                } else {
-                    Command::DownloadImages(pending)
-                }
+                batch_commands(img_pending, emoji_pending)
             }
 
             AppEvent::MessagesLoadFailed {
@@ -520,6 +556,19 @@ impl AppState {
             }
             AppEvent::AttachmentImageFailed { attachment_id } => {
                 self.discord.image_downloading.remove(&attachment_id);
+                Command::None
+            }
+            AppEvent::EmojiImageLoaded { emoji_id, image } => {
+                self.discord.emoji_downloading.remove(&emoji_id);
+                if let Some(picker) = self.picker.as_mut() {
+                    let protocol =
+                        crate::emoji::prepare_emoji_protocol(picker, *image, self.bg_color);
+                    self.discord.emoji_protocols.insert(emoji_id, protocol);
+                }
+                Command::None
+            }
+            AppEvent::EmojiImageFailed { emoji_id } => {
+                self.discord.emoji_downloading.remove(&emoji_id);
                 Command::None
             }
 
@@ -544,18 +593,15 @@ impl AppState {
                 messages,
             } => {
                 self.discord.loading_older.remove(&channel_id);
-                let pending = self.collect_pending_image_downloads(&messages);
+                let img_pending = self.collect_pending_image_downloads(&messages);
+                let emoji_pending = self.collect_pending_emoji_downloads(&messages);
                 // 未初期化チャンネルでも取得結果が破棄されないよう entry().or_default() で挿入
                 self.discord
                     .messages
                     .entry(channel_id)
                     .or_default()
                     .extend(messages);
-                if pending.is_empty() {
-                    Command::None
-                } else {
-                    Command::DownloadImages(pending)
-                }
+                batch_commands(img_pending, emoji_pending)
             }
 
             // UI イベント
@@ -1118,6 +1164,25 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 画像/絵文字のダウンロード Command を必要に応じて Batch にまとめる
+fn batch_commands(
+    images: Vec<(String, String)>,
+    emojis: Vec<(String, String)>,
+) -> Command {
+    let mut cmds: Vec<Command> = Vec::new();
+    if !images.is_empty() {
+        cmds.push(Command::DownloadImages(images));
+    }
+    if !emojis.is_empty() {
+        cmds.push(Command::DownloadEmojis(emojis));
+    }
+    match cmds.len() {
+        0 => Command::None,
+        1 => cmds.into_iter().next().unwrap(),
+        _ => Command::Batch(cmds),
     }
 }
 

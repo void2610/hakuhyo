@@ -2,7 +2,9 @@ mod app;
 mod auth;
 mod config;
 mod discord;
+mod emoji;
 mod events;
+mod term_bg;
 mod token_store;
 mod ui;
 
@@ -72,13 +74,16 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    // ターミナル背景色を取得 (絵文字の透明部分合成に使用)
+    let bg_color = term_bg::detect_background_color();
+    log::info!("Detected terminal bg color: rgb({},{},{})", bg_color[0], bg_color[1], bg_color[2]);
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     // アプリケーションを実行し、終了するまで待機
-    let result = run_app(&mut terminal, token, picker).await;
+    let result = run_app(&mut terminal, token, picker, bg_color).await;
 
     // ターミナル復元
     disable_raw_mode()?;
@@ -98,11 +103,13 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     token: String,
     picker: Option<Picker>,
+    bg_color: [u8; 3],
 ) -> anyhow::Result<()> {
     log::info!("Initializing application state");
 
     let mut app = AppState::new();
     app.set_picker(picker);
+    app.set_bg_color(bg_color);
 
     // 設定ファイルを読み込み
     if let Ok(config) = config::load_config() {
@@ -330,6 +337,44 @@ fn dispatch_command(
                     log::warn!("Ack failed (channel={}): {}", channel_id, e);
                 }
             });
+        }
+        Command::DownloadEmojis(items) => {
+            for (emoji_id, url) in items {
+                let tx2 = tx.clone();
+                tokio::spawn(async move {
+                    log::debug!("Downloading emoji: id={}, url={}", emoji_id, url);
+                    let result: Result<image::DynamicImage, String> = match reqwest::get(&url).await
+                    {
+                        Ok(resp) => match resp.bytes().await {
+                            Ok(bytes) => match tokio::task::spawn_blocking(move || {
+                                image::load_from_memory(&bytes)
+                            })
+                            .await
+                            {
+                                Ok(Ok(img)) => Ok(img),
+                                Ok(Err(e)) => Err(format!("decode failed: {}", e)),
+                                Err(e) => Err(format!("decode task panic: {}", e)),
+                            },
+                            Err(e) => Err(format!("read bytes failed: {}", e)),
+                        },
+                        Err(e) => Err(format!("download failed: {}", e)),
+                    };
+                    match result {
+                        Ok(img) => {
+                            let _ = tx2
+                                .send(AppEvent::EmojiImageLoaded {
+                                    emoji_id,
+                                    image: Box::new(img),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            log::warn!("Emoji fetch error ({}): {}", emoji_id, e);
+                            let _ = tx2.send(AppEvent::EmojiImageFailed { emoji_id }).await;
+                        }
+                    }
+                });
+            }
         }
         Command::DownloadImages(items) => {
             for (att_id, url) in items {

@@ -439,8 +439,24 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                 width: inner.width,
                 height: 1,
             };
-            let line = build_message_line(msg);
+            let (line, emoji_positions) = build_message_line(msg);
             frame.render_widget(Paragraph::new(line), text_area);
+            // カスタム絵文字を 2 セル幅 x 1 セル高でテキスト行上にオーバーレイ
+            for (x_off, emoji_id) in emoji_positions {
+                if x_off + 2 > text_area.width {
+                    continue;
+                }
+                let emoji_area = Rect {
+                    x: text_area.x + x_off,
+                    y: text_area.y,
+                    width: 2,
+                    height: 1,
+                };
+                if let Some(protocol) = app.discord.emoji_protocols.get_mut(&emoji_id) {
+                    let widget = StatefulImage::new(None);
+                    frame.render_stateful_widget(widget, emoji_area, protocol);
+                }
+            }
         }
 
         // 画像領域 (テキストの 1 行下から)
@@ -606,40 +622,58 @@ fn build_unread_separator_line(width: u16) -> Line<'static> {
 }
 
 
-/// 1メッセージ分のテキスト行を構築
-fn build_message_line(msg: &Message) -> Line<'_> {
+/// 1メッセージ分のテキスト行と、カスタム絵文字の (x cell オフセット, emoji_id) リストを構築
+fn build_message_line(msg: &Message) -> (Line<'static>, Vec<(u16, String)>) {
     let time = format_timestamp(&msg.timestamp);
+    let time_str = format!("[{}] ", time);
+    let user_str = format!("{}: ", msg.author_display_name());
 
-    let mut spans = vec![
+    let mut col_offset: u16 = (time_str.as_str().width() + user_str.as_str().width()) as u16;
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::styled(time_str, Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("[{}] ", time),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            format!("{}: ", msg.author_display_name()),
+            user_str,
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
+    let mut emoji_positions: Vec<(u16, String)> = Vec::new();
 
     if !msg.content.is_empty() {
-        spans.push(Span::raw(&msg.content));
+        for seg in crate::emoji::parse_message_segments(&msg.content) {
+            match seg {
+                crate::emoji::MessageSegment::Text(t) => {
+                    let w = t.as_str().width() as u16;
+                    spans.push(Span::raw(t));
+                    col_offset = col_offset.saturating_add(w);
+                }
+                crate::emoji::MessageSegment::Emoji { id, .. } => {
+                    // 2 セル幅占位 (画像オーバーレイ用)
+                    spans.push(Span::raw("  ".to_string()));
+                    emoji_positions.push((col_offset, id));
+                    col_offset = col_offset.saturating_add(2);
+                }
+            }
+        }
     }
 
     for (i, attachment) in msg.attachments.iter().enumerate() {
         if i > 0 || !msg.content.is_empty() {
-            spans.push(Span::raw(" "));
+            spans.push(Span::raw(" ".to_string()));
+            col_offset = col_offset.saturating_add(1);
         }
+        let txt = attachment.display_text();
+        col_offset = col_offset.saturating_add(txt.as_str().width() as u16);
         spans.push(Span::styled(
-            attachment.display_text(),
+            txt,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::ITALIC),
         ));
     }
 
-    Line::from(spans)
+    (Line::from(spans), emoji_positions)
 }
 
 /// 入力エリアを描画
