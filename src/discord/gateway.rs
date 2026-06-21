@@ -468,7 +468,10 @@ impl GatewayClient {
             }
             "MESSAGE_CREATE" => match serde_json::from_value::<models::Message>(data) {
                 Ok(message) => MessageResult::Event(GatewayEvent::MessageCreate(message)),
-                Err(_) => MessageResult::Ignore,
+                Err(e) => {
+                    log::warn!("Failed to parse MESSAGE_CREATE: {}", e);
+                    MessageResult::Ignore
+                }
             },
             "MESSAGE_UPDATE" => match serde_json::from_value::<models::Message>(data) {
                 Ok(message) => MessageResult::Event(GatewayEvent::MessageUpdate(message)),
