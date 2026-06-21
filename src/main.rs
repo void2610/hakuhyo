@@ -13,7 +13,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use discord::{DiscordRestClient, GatewayClient, GatewayEvent};
+use discord::{DiscordRestClient, GatewayClient, GatewayEvent, RestError};
 use events::AppEvent;
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -224,127 +224,8 @@ async fn run_app(
             // 状態更新
             let command = app.update(event);
 
-            // コマンド実行
-            let rest = rest_client.clone();
-            let tx = event_tx.clone();
-            match command {
-                Command::LoadMessages(channel_id) => {
-                    tokio::spawn(async move {
-                        if let Ok(messages) = rest.get_messages(&channel_id, 50, None).await {
-                            let _ = tx
-                                .send(AppEvent::MessagesLoaded {
-                                    channel_id,
-                                    messages,
-                                })
-                                .await;
-                        }
-                    });
-                }
-                Command::LoadOlderMessages { channel_id, before } => {
-                    tokio::spawn(async move {
-                        match rest.get_messages(&channel_id, 50, Some(&before)).await {
-                            Ok(messages) => {
-                                let _ = tx
-                                    .send(AppEvent::OlderMessagesLoaded {
-                                        channel_id,
-                                        messages,
-                                    })
-                                    .await;
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to load older messages: {}", e);
-                                // 失敗時もロード中フラグを解除する (空の結果を送る)
-                                let _ = tx
-                                    .send(AppEvent::OlderMessagesLoaded {
-                                        channel_id,
-                                        messages: Vec::new(),
-                                    })
-                                    .await;
-                            }
-                        }
-                    });
-                }
-                Command::SendMessage {
-                    channel_id,
-                    content,
-                } => {
-                    tokio::spawn(async move {
-                        if let Ok(message) = rest.send_message(&channel_id, &content).await {
-                            let _ = tx.send(AppEvent::MessageSent(message)).await;
-                        }
-                    });
-                }
-                Command::DownloadImages(items) => {
-                    for (att_id, url) in items {
-                        let tx2 = tx.clone();
-                        tokio::spawn(async move {
-                            log::debug!("Downloading image: id={}, url={}", att_id, url);
-                            // 任意の段階で失敗したら Failed を送って image_downloading を必ず解除する
-                            let result: Result<image::DynamicImage, String> =
-                                match reqwest::get(&url).await {
-                                    Ok(resp) => match resp.bytes().await {
-                                        Ok(bytes) => {
-                                            match tokio::task::spawn_blocking(move || {
-                                                image::load_from_memory(&bytes)
-                                            })
-                                            .await
-                                            {
-                                                Ok(Ok(img)) => Ok(img),
-                                                Ok(Err(e)) => {
-                                                    Err(format!("decode failed: {}", e))
-                                                }
-                                                Err(e) => Err(format!("decode task panic: {}", e)),
-                                            }
-                                        }
-                                        Err(e) => Err(format!("read bytes failed: {}", e)),
-                                    },
-                                    Err(e) => Err(format!("download failed: {}", e)),
-                                };
-                            match result {
-                                Ok(img) => {
-                                    let _ = tx2
-                                        .send(AppEvent::AttachmentImageLoaded {
-                                            attachment_id: att_id,
-                                            image: Box::new(img),
-                                        })
-                                        .await;
-                                }
-                                Err(e) => {
-                                    log::warn!("Image fetch error ({}): {}", att_id, e);
-                                    let _ = tx2
-                                        .send(AppEvent::AttachmentImageFailed {
-                                            attachment_id: att_id,
-                                        })
-                                        .await;
-                                }
-                            }
-                        });
-                    }
-                }
-                Command::OpenInDiscord { guild_id, channel_id } => {
-                    // discord://-/channels/<guild_or_@me>/<channel_id>
-                    let guild_segment = guild_id.unwrap_or_else(|| "@me".to_string());
-                    let url = format!("discord://-/channels/{}/{}", guild_segment, channel_id);
-                    log::info!("Opening in Discord app: {}", url);
-                    tokio::spawn(async move {
-                        let opener = if cfg!(target_os = "macos") {
-                            "open"
-                        } else if cfg!(target_os = "windows") {
-                            "start"
-                        } else {
-                            "xdg-open"
-                        };
-                        let result = tokio::process::Command::new(opener)
-                            .arg(&url)
-                            .status()
-                            .await;
-                        if let Err(e) = result {
-                            log::error!("Failed to launch Discord ({}): {}", opener, e);
-                        }
-                    });
-                }
-                Command::None => {}
-            }
+            // コマンド実行 (Batch は flatten してから処理)
+            dispatch_command(command, &rest_client, &event_tx);
         }
     }
 
@@ -358,4 +239,164 @@ async fn run_app(
     }
 
     Ok(())
+}
+
+fn dispatch_command(
+    command: Command,
+    rest_client: &DiscordRestClient,
+    event_tx: &mpsc::Sender<AppEvent>,
+) {
+    let rest = rest_client.clone();
+    let tx = event_tx.clone();
+    match command {
+        Command::Batch(cmds) => {
+            for c in cmds {
+                dispatch_command(c, rest_client, event_tx);
+            }
+        }
+        Command::LoadMessages(channel_id) => {
+            tokio::spawn(async move {
+                match rest.get_messages(&channel_id, 50, None).await {
+                    Ok(messages) => {
+                        let _ = tx
+                            .send(AppEvent::MessagesLoaded {
+                                channel_id,
+                                messages,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        log::warn!("LoadMessages failed for {}: {}", channel_id, e);
+                        // 4xx (429 を除く) のみ恒久的エラー扱い。429 / 5xx / ネットワーク
+                        // エラーは一時的なので inaccessible に入れない。
+                        let permanent = matches!(
+                            e,
+                            RestError::Http { status, .. } if (400..500).contains(&status) && status != 429
+                        );
+                        let _ = tx
+                            .send(AppEvent::MessagesLoadFailed {
+                                channel_id,
+                                permanent,
+                            })
+                            .await;
+                    }
+                }
+            });
+        }
+        Command::LoadOlderMessages { channel_id, before } => {
+            tokio::spawn(async move {
+                match rest.get_messages(&channel_id, 50, Some(&before)).await {
+                    Ok(messages) => {
+                        let _ = tx
+                            .send(AppEvent::OlderMessagesLoaded {
+                                channel_id,
+                                messages,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load older messages: {}", e);
+                        // 失敗時もロード中フラグを解除する (空の結果を送る)
+                        let _ = tx
+                            .send(AppEvent::OlderMessagesLoaded {
+                                channel_id,
+                                messages: Vec::new(),
+                            })
+                            .await;
+                    }
+                }
+            });
+        }
+        Command::SendMessage {
+            channel_id,
+            content,
+        } => {
+            tokio::spawn(async move {
+                if let Ok(message) = rest.send_message(&channel_id, &content).await {
+                    let _ = tx.send(AppEvent::MessageSent(message)).await;
+                }
+            });
+        }
+        Command::AckChannel {
+            channel_id,
+            message_id,
+        } => {
+            tokio::spawn(async move {
+                if let Err(e) = rest.ack_message(&channel_id, &message_id).await {
+                    log::warn!("Ack failed (channel={}): {}", channel_id, e);
+                }
+            });
+        }
+        Command::DownloadImages(items) => {
+            for (att_id, url) in items {
+                let tx2 = tx.clone();
+                tokio::spawn(async move {
+                    log::debug!("Downloading image: id={}, url={}", att_id, url);
+                    // 任意の段階で失敗したら Failed を送って image_downloading を必ず解除する
+                    let result: Result<image::DynamicImage, String> = match reqwest::get(&url).await
+                    {
+                        Ok(resp) => match resp.bytes().await {
+                            Ok(bytes) => {
+                                match tokio::task::spawn_blocking(move || {
+                                    image::load_from_memory(&bytes)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(img)) => Ok(img),
+                                    Ok(Err(e)) => Err(format!("decode failed: {}", e)),
+                                    Err(e) => Err(format!("decode task panic: {}", e)),
+                                }
+                            }
+                            Err(e) => Err(format!("read bytes failed: {}", e)),
+                        },
+                        Err(e) => Err(format!("download failed: {}", e)),
+                    };
+                    match result {
+                        Ok(img) => {
+                            let _ = tx2
+                                .send(AppEvent::AttachmentImageLoaded {
+                                    attachment_id: att_id,
+                                    image: Box::new(img),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            log::warn!("Image fetch error ({}): {}", att_id, e);
+                            let _ = tx2
+                                .send(AppEvent::AttachmentImageFailed {
+                                    attachment_id: att_id,
+                                })
+                                .await;
+                        }
+                    }
+                });
+            }
+        }
+        Command::OpenInDiscord {
+            guild_id,
+            channel_id,
+        } => {
+            // discord://-/channels/<guild_or_@me>/<channel_id>
+            let guild_segment = guild_id.unwrap_or_else(|| "@me".to_string());
+            let url = format!("discord://-/channels/{}/{}", guild_segment, channel_id);
+            log::info!("Opening in Discord app: {}", url);
+            tokio::spawn(async move {
+                let opener = if cfg!(target_os = "macos") {
+                    "open"
+                } else if cfg!(target_os = "windows") {
+                    "start"
+                } else {
+                    "xdg-open"
+                };
+                let result = tokio::process::Command::new(opener)
+                    .arg(&url)
+                    .status()
+                    .await;
+                if let Err(e) = result {
+                    log::error!("Failed to launch Discord ({}): {}", opener, e);
+                }
+            });
+        }
+        Command::None => {}
+    }
 }

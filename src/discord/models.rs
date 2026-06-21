@@ -73,6 +73,34 @@ pub struct MessageMember {
     pub nick: Option<String>,
 }
 
+/// READY イベント内 read_state エントリ (チャンネル毎の既読状態)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReadStateEntry {
+    pub id: String, // channel_id
+    #[serde(default)]
+    pub last_message_id: Option<String>,
+    #[serde(default)]
+    pub mention_count: u32,
+}
+
+/// READY イベント内 user_guild_settings エントリ (サーバー単位の通知設定)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserGuildSettingsEntry {
+    pub guild_id: Option<String>, // null は DM 設定
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub channel_overrides: Vec<ChannelOverride>,
+}
+
+/// チャンネル単位の通知 override
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelOverride {
+    pub channel_id: String,
+    #[serde(default)]
+    pub muted: bool,
+}
+
 impl Message {
     /// 表示用の作者名を取得 (サーバーニックネーム → global_name → username の優先順)
     pub fn author_display_name(&self) -> &str {
@@ -108,6 +136,8 @@ pub struct Channel {
     pub recipient_ids: Option<Vec<String>>, // DM用（ユーザーIDのみ、READYイベントで使用）
     #[serde(default)]
     pub parent_id: Option<String>, // スレッドの親チャンネル / カテゴリ
+    #[serde(default)]
+    pub last_message_id: Option<String>, // 直近メッセージ ID (未読判定用)
 }
 
 impl Channel {

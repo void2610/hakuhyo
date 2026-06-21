@@ -41,6 +41,26 @@ pub struct DiscordState {
     pub image_downloading: HashSet<String>,
     /// 過去メッセージ追加読み込み中の channel_id (重複防止)
     pub loading_older: HashSet<String>,
+    /// channel_id -> 最後に既読化した message_id (未読判定用)
+    pub read_states: HashMap<String, Option<String>>,
+    /// channel_id -> 未読メンション数 (ミュート時もメンションがあれば例外的に未読表示)
+    pub mention_counts: HashMap<String, u32>,
+    /// guild_id -> サーバー全体ミュート状態
+    pub muted_guilds: HashSet<String>,
+    /// channel_id -> チャンネル個別ミュート状態
+    pub muted_channels: HashSet<String>,
+    /// 起動後に ack 済みのチャンネル ID。既読化してもセッション中は未読リストに
+    /// 残し、グレーアウト表示する (カーソル位置と表示の不整合を防ぐため)。
+    /// MESSAGE_CREATE で新着があれば取り除き、通常の未読扱いに戻す。
+    pub acked_in_session: HashSet<String>,
+    /// REST で取得できなかった (権限がない可能性が高い) チャンネル。
+    /// 未読リスト表示から除外する。
+    pub inaccessible_channels: HashSet<String>,
+    /// 直近に計算した未読チャンネル ID 一覧 (ソート済み)。
+    /// 100ms 周期の Tick 描画で毎回 sort を走らせないためのキャッシュ。
+    pub unread_cache: Vec<String>,
+    /// 未読関連の状態が変わったかどうか (true なら次の描画前に再計算)
+    pub unread_cache_dirty: bool,
 }
 
 /// UI関連の状態
@@ -60,6 +80,8 @@ pub struct UiState {
     /// 描画時に計算した scroll_offset の上限 (ui.rs から書き戻し)。
     /// 最古到達判定 (apply_scroll 時の過去ロード起動) に使う。
     pub cached_max_scroll_offset: usize,
+    /// サイドバーで現在カーソルが乗っているリスト (Favorites / Unread)
+    pub sidebar_focus: SidebarFocus,
 }
 
 /// 入力モード
@@ -67,6 +89,13 @@ pub struct UiState {
 pub enum InputMode {
     Normal,  // ナビゲーションモード
     Editing, // 入力モード
+}
+
+/// サイドバーでカーソルが乗っているリスト
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarFocus {
+    Favorites,
+    Unread,
 }
 
 /// コマンド（副作用を持つ処理）
@@ -79,6 +108,10 @@ pub enum Command {
     OpenInDiscord { guild_id: Option<String>, channel_id: String },
     /// 画像添付ファイルのダウンロード (attachment_id, url)
     DownloadImages(Vec<(String, String)>),
+    /// チャンネルの最新メッセージを既読化 (公式クライアントにも反映)
+    AckChannel { channel_id: String, message_id: String },
+    /// 複数 Command を一括発火 (例: 画像ダウンロード + ack)
+    Batch(Vec<Command>),
     None,
 }
 
@@ -99,6 +132,14 @@ impl AppState {
                 image_sources: HashMap::new(),
                 image_downloading: HashSet::new(),
                 loading_older: HashSet::new(),
+                read_states: HashMap::new(),
+                mention_counts: HashMap::new(),
+                muted_guilds: HashSet::new(),
+                muted_channels: HashSet::new(),
+                acked_in_session: HashSet::new(),
+                inaccessible_channels: HashSet::new(),
+                unread_cache: Vec::new(),
+                unread_cache_dirty: true,
             },
             ui: UiState {
                 selected_channel: None,
@@ -111,6 +152,7 @@ impl AppState {
                 search_buffer: String::new(),
                 message_scroll_offset: 0,
                 cached_max_scroll_offset: 0,
+                sidebar_focus: SidebarFocus::Favorites,
             },
             picker: None,
         }
@@ -236,6 +278,49 @@ impl AppState {
                     }
                 }
 
+                // read_state エントリを抽出 (チャンネル毎の既読位置 + mention 数)
+                let read_entries = ready_data
+                    .get("read_state")
+                    .and_then(|rs| rs.get("entries").and_then(|v| v.as_array()).or(rs.as_array()));
+                if let Some(entries) = read_entries {
+                    log::info!("READY contains {} read_state entries", entries.len());
+                    for entry in entries {
+                        if let Ok(rs) = serde_json::from_value::<crate::discord::ReadStateEntry>(
+                            entry.clone(),
+                        ) {
+                            self.discord.read_states.insert(rs.id.clone(), rs.last_message_id);
+                            if rs.mention_count > 0 {
+                                self.discord.mention_counts.insert(rs.id, rs.mention_count);
+                            }
+                        }
+                    }
+                }
+
+                // ユーザーのギルド毎の通知設定 (ミュート) を抽出
+                let guild_settings = ready_data
+                    .get("user_guild_settings")
+                    .and_then(|s| s.get("entries").and_then(|v| v.as_array()).or(s.as_array()));
+                if let Some(entries) = guild_settings {
+                    log::info!("READY contains {} user_guild_settings entries", entries.len());
+                    for entry in entries {
+                        if let Ok(gs) = serde_json::from_value::<
+                            crate::discord::UserGuildSettingsEntry,
+                        >(entry.clone())
+                        {
+                            if let Some(gid) = gs.guild_id.as_deref() {
+                                if gs.muted {
+                                    self.discord.muted_guilds.insert(gid.to_string());
+                                }
+                            }
+                            for over in gs.channel_overrides {
+                                if over.muted {
+                                    self.discord.muted_channels.insert(over.channel_id);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // DM チャンネルを抽出
                 if let Some(private_channels) = ready_data.get("private_channels").and_then(|v| v.as_array()) {
                     log::info!("Found {} private channels", private_channels.len());
@@ -282,7 +367,7 @@ impl AppState {
                     if let Some(channel_id) = first_channel_id {
                         self.ui.selected_channel = Some(channel_id.clone());
                         self.ui.channel_list_state.select(Some(0));
-                        return Command::LoadMessages(channel_id);
+                        return self.select_channel_commands(channel_id);
                     }
                 }
 
@@ -312,7 +397,7 @@ impl AppState {
                     if let Some(channel_id) = first_channel_id {
                         self.ui.selected_channel = Some(channel_id.clone());
                         self.ui.channel_list_state.select(Some(0));
-                        return Command::LoadMessages(channel_id);
+                        return self.select_channel_commands(channel_id);
                     }
                 }
 
@@ -335,6 +420,13 @@ impl AppState {
 
             AppEvent::MessageCreate(message) => {
                 let pending = self.collect_pending_image_downloads(std::slice::from_ref(&message));
+                // 該当チャンネルの last_message_id を更新 (未読判定用)
+                if let Some(channel) = self.discord.channels.get_mut(&message.channel_id) {
+                    channel.last_message_id = Some(message.id.clone());
+                }
+                // 新着が来たら「セッション中既読化済み」フラグを解除し、通常の未読に戻す
+                self.discord.acked_in_session.remove(&message.channel_id);
+                self.invalidate_unread_cache();
                 self.discord
                     .messages
                     .entry(message.channel_id.clone())
@@ -370,6 +462,21 @@ impl AppState {
                 channel_id,
                 messages,
             } => {
+                // 「last_message_id があるはずなのに空が返る」場合は権限なしの可能性 → 除外
+                let has_history = self
+                    .discord
+                    .channels
+                    .get(&channel_id)
+                    .and_then(|c| c.last_message_id.as_ref())
+                    .is_some();
+                if messages.is_empty() && has_history {
+                    log::info!(
+                        "Channel {} appears inaccessible (empty result with last_message_id)",
+                        channel_id
+                    );
+                    self.discord.inaccessible_channels.insert(channel_id.clone());
+                    self.invalidate_unread_cache();
+                }
                 let pending = self.collect_pending_image_downloads(&messages);
                 self.discord.messages.insert(channel_id, messages);
                 if pending.is_empty() {
@@ -377,6 +484,17 @@ impl AppState {
                 } else {
                     Command::DownloadImages(pending)
                 }
+            }
+
+            AppEvent::MessagesLoadFailed {
+                channel_id,
+                permanent,
+            } => {
+                if permanent {
+                    self.discord.inaccessible_channels.insert(channel_id);
+                    self.invalidate_unread_cache();
+                }
+                Command::None
             }
 
             AppEvent::AttachmentImageLoaded { attachment_id, image } => {
@@ -393,7 +511,7 @@ impl AppState {
             AppEvent::MessageSent(message) => {
                 // メッセージ送信後にメッセージリストを再読み込みして最新の状態を取得
                 self.ui.message_scroll_offset = 0;
-                Command::LoadMessages(message.channel_id)
+                self.select_channel_commands(message.channel_id)
             }
 
             AppEvent::ScrollMessages(delta) => {
@@ -459,8 +577,8 @@ impl AppState {
                     // チャンネル選択確定して検索モードを終了
                     self.toggle_search_mode();
                     self.ui.message_scroll_offset = 0;
-                    if let Some(channel_id) = &self.ui.selected_channel {
-                        Command::LoadMessages(channel_id.clone())
+                    if let Some(channel_id) = self.ui.selected_channel.clone() {
+                        self.select_channel_commands(channel_id)
                     } else {
                         Command::None
                     }
@@ -491,6 +609,7 @@ impl AppState {
                     self.toggle_favorite();
                     Command::None
                 }
+                KeyCode::Tab | KeyCode::Char('u') => self.toggle_sidebar_focus(),
                 KeyCode::Char('e') => {
                     self.apply_scroll(1);
                     self.maybe_load_older_messages_if_at_top()
@@ -520,8 +639,8 @@ impl AppState {
                 KeyCode::Enter => {
                     // チャンネル選択確定
                     self.ui.message_scroll_offset = 0;
-                    if let Some(channel_id) = &self.ui.selected_channel {
-                        Command::LoadMessages(channel_id.clone())
+                    if let Some(channel_id) = self.ui.selected_channel.clone() {
+                        self.select_channel_commands(channel_id)
                     } else {
                         Command::None
                     }
@@ -560,14 +679,74 @@ impl AppState {
         }
     }
 
-    /// 現在表示中のチャンネルリストを取得（検索モード/お気に入りモード対応）
+    /// 現在カーソル操作対象のチャンネルリストを取得
     fn get_current_display_channels(&self) -> Vec<&Channel> {
         if self.ui.search_mode {
-            // 検索モード: 検索結果を返す
             self.search_channels(&self.ui.search_buffer)
         } else {
-            // 通常モード: お気に入りを返す
-            self.get_favorite_channels()
+            match self.ui.sidebar_focus {
+                SidebarFocus::Favorites => self.get_favorite_channels(),
+                SidebarFocus::Unread => self.get_unread_channels(),
+            }
+        }
+    }
+
+    /// チャンネル選択時の Command を組み立てる。
+    /// LoadMessages に加えて、未読がある場合は ack も同時に発火する
+    /// (REST のメッセージ取得結果に依存せず、READY 由来の last_message_id を使う)。
+    fn select_channel_commands(&mut self, channel_id: String) -> Command {
+        let last_msg = self
+            .discord
+            .channels
+            .get(&channel_id)
+            .and_then(|c| c.last_message_id.clone());
+        let mut cmds = vec![Command::LoadMessages(channel_id.clone())];
+        if let Some(message_id) = last_msg {
+            let already_read = matches!(
+                self.discord.read_states.get(&channel_id),
+                Some(Some(read)) if read.as_str() == message_id.as_str()
+            );
+            if !already_read {
+                // 楽観的に read_states を更新、セッション中は未読リストに残す (グレーアウト)
+                self.discord
+                    .read_states
+                    .insert(channel_id.clone(), Some(message_id.clone()));
+                self.discord.mention_counts.remove(&channel_id);
+                self.discord.acked_in_session.insert(channel_id.clone());
+                self.invalidate_unread_cache();
+                cmds.push(Command::AckChannel {
+                    channel_id,
+                    message_id,
+                });
+            }
+        }
+        match cmds.len() {
+            1 => cmds.into_iter().next().unwrap(),
+            _ => Command::Batch(cmds),
+        }
+    }
+
+    /// サイドバーのフォーカスを切り替え (Tab / u キー用)。
+    /// 切り替え先の先頭チャンネルを自動選択してメッセージ画面も切り替える。
+    pub fn toggle_sidebar_focus(&mut self) -> Command {
+        self.ui.sidebar_focus = match self.ui.sidebar_focus {
+            SidebarFocus::Favorites => SidebarFocus::Unread,
+            SidebarFocus::Unread => SidebarFocus::Favorites,
+        };
+        self.ui.channel_list_state.select(Some(0));
+        log::debug!("Sidebar focus: {:?}", self.ui.sidebar_focus);
+
+        // 切り替え先の先頭チャンネルがあれば、それを選択してメッセージをロード
+        let next_channel = self
+            .get_current_display_channels()
+            .first()
+            .map(|ch| ch.id.clone());
+        if let Some(channel_id) = next_channel {
+            self.ui.selected_channel = Some(channel_id.clone());
+            self.ui.message_scroll_offset = 0;
+            self.select_channel_commands(channel_id)
+        } else {
+            Command::None
         }
     }
 
@@ -594,8 +773,8 @@ impl AppState {
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
         self.ui.message_scroll_offset = 0;
 
-        // チャンネル切り替え時に自動的にメッセージを読み込む
-        Command::LoadMessages(channel_ids[new_index].clone())
+        // チャンネル切り替え時に自動的にメッセージを読み込む + 既読化
+        self.select_channel_commands(channel_ids[new_index].clone())
     }
 
     /// 次のチャンネルを選択
@@ -621,8 +800,8 @@ impl AppState {
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
         self.ui.message_scroll_offset = 0;
 
-        // チャンネル切り替え時に自動的にメッセージを読み込む
-        Command::LoadMessages(channel_ids[new_index].clone())
+        // チャンネル切り替え時に自動的にメッセージを読み込む + 既読化
+        self.select_channel_commands(channel_ids[new_index].clone())
     }
 
     /// スクロール位置が直近に描画した上限 (= 最古メッセージが画面に出ている) に
@@ -704,6 +883,85 @@ impl AppState {
         });
 
         favorites
+    }
+
+    /// チャンネル or 親ギルドがミュートされているか
+    fn is_channel_muted(&self, channel: &Channel) -> bool {
+        if self.discord.muted_channels.contains(&channel.id) {
+            return true;
+        }
+        if let Some(gid) = &channel.guild_id {
+            if self.discord.muted_guilds.contains(gid) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// チャンネルが未読かどうか。
+    /// ミュート設定されている場合は基本的に未読扱いしないが、@メンションがある場合は例外。
+    pub fn is_channel_unread(&self, channel: &Channel) -> bool {
+        let Some(last) = channel.last_message_id.as_deref() else {
+            return false;
+        };
+        let new_messages = match self.discord.read_states.get(&channel.id) {
+            Some(Some(read)) => snowflake_gt(last, read.as_str()),
+            // read state エントリが無ければ既読扱い (普段触れていないチャンネル)
+            _ => false,
+        };
+        if !new_messages {
+            return false;
+        }
+        // ミュート時はメンションがある場合のみ未読扱い
+        if self.is_channel_muted(channel) {
+            return self
+                .discord
+                .mention_counts
+                .get(&channel.id)
+                .copied()
+                .unwrap_or(0)
+                > 0;
+        }
+        true
+    }
+
+    /// 未読チャンネル一覧を取得。キャッシュ済みの ID 列を Channel 参照に解決して返す。
+    /// 描画前に `refresh_unread_cache()` が呼ばれていることを前提とする。
+    pub fn get_unread_channels(&self) -> Vec<&Channel> {
+        self.discord
+            .unread_cache
+            .iter()
+            .filter_map(|id| self.discord.channels.get(id))
+            .collect()
+    }
+
+    /// 未読リストのキャッシュを再計算する。dirty フラグが立っているときだけ走る。
+    pub fn refresh_unread_cache(&mut self) {
+        if !self.discord.unread_cache_dirty {
+            return;
+        }
+        let mut entries: Vec<&Channel> = self
+            .discord
+            .channels
+            .values()
+            .filter(|ch| {
+                ch.is_messageable()
+                    && !self.discord.inaccessible_channels.contains(&ch.id)
+                    && (self.is_channel_unread(ch)
+                        || self.discord.acked_in_session.contains(&ch.id))
+            })
+            .collect();
+        entries.sort_by(|a, b| match a.channel_type.cmp(&b.channel_type) {
+            std::cmp::Ordering::Equal => a.display_name().cmp(&b.display_name()),
+            other => other,
+        });
+        self.discord.unread_cache = entries.iter().map(|c| c.id.clone()).collect();
+        self.discord.unread_cache_dirty = false;
+    }
+
+    /// 未読リストキャッシュを無効化する (状態変化が起きたとき)
+    fn invalidate_unread_cache(&mut self) {
+        self.discord.unread_cache_dirty = true;
     }
 
     /// チャンネルを検索（名前・ギルド名でフィルタリング）
@@ -829,5 +1087,14 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Discord snowflake ID (数値文字列) の大小比較。a > b なら true
+fn snowflake_gt(a: &str, b: &str) -> bool {
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => a > b,
     }
 }

@@ -41,6 +41,13 @@ pub enum AppEvent {
         channel_id: String,
         messages: Vec<Message>,
     },
+    /// チャンネルのメッセージ取得が失敗。
+    /// `permanent` が true (権限なし等の 4xx) の場合のみ inaccessible 扱いとし、
+    /// 一時エラー (ネットワーク/5xx/429) は false で次回再試行を許可する。
+    MessagesLoadFailed {
+        channel_id: String,
+        permanent: bool,
+    },
     /// メッセージリストを行単位でスクロール (正: 古い側へ / 負: 新しい側へ)
     ScrollMessages(i32),
     /// 画像添付ファイルのデコード完了 (DynamicImage は重いので Box で包む)
