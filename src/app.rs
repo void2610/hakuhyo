@@ -403,10 +403,12 @@ impl AppState {
             } => {
                 self.discord.loading_older.remove(&channel_id);
                 let pending = self.collect_pending_image_downloads(&messages);
-                if let Some(existing) = self.discord.messages.get_mut(&channel_id) {
-                    // REST は新→古の順で返すため、既存の末尾 (= 古い側) に append
-                    existing.extend(messages);
-                }
+                // 未初期化チャンネルでも取得結果が破棄されないよう entry().or_default() で挿入
+                self.discord
+                    .messages
+                    .entry(channel_id)
+                    .or_default()
+                    .extend(messages);
                 if pending.is_empty() {
                     Command::None
                 } else {
