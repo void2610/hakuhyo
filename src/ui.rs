@@ -247,7 +247,9 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                     (a.id.clone(), cells)
                 })
                 .collect();
-            let h: u16 = 1u16.saturating_add(images.iter().map(|(_, c)| *c).sum::<u16>());
+            // 画像が多数 or 高さが大きい場合に u16 がオーバーフローしないよう u32 で集計
+            let img_sum: u32 = images.iter().map(|(_, c)| *c as u32).sum();
+            let h: u16 = (1u32 + img_sum).min(u16::MAX as u32) as u16;
             (msg.clone(), h, images)
         })
         .collect();
