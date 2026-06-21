@@ -56,6 +56,11 @@ pub struct DiscordState {
     /// REST で取得できなかった (権限がない可能性が高い) チャンネル。
     /// 未読リスト表示から除外する。
     pub inaccessible_channels: HashSet<String>,
+    /// 直近に計算した未読チャンネル ID 一覧 (ソート済み)。
+    /// 100ms 周期の Tick 描画で毎回 sort を走らせないためのキャッシュ。
+    pub unread_cache: Vec<String>,
+    /// 未読関連の状態が変わったかどうか (true なら次の描画前に再計算)
+    pub unread_cache_dirty: bool,
 }
 
 /// UI関連の状態
@@ -133,6 +138,8 @@ impl AppState {
                 muted_channels: HashSet::new(),
                 acked_in_session: HashSet::new(),
                 inaccessible_channels: HashSet::new(),
+                unread_cache: Vec::new(),
+                unread_cache_dirty: true,
             },
             ui: UiState {
                 selected_channel: None,
@@ -419,6 +426,7 @@ impl AppState {
                 }
                 // 新着が来たら「セッション中既読化済み」フラグを解除し、通常の未読に戻す
                 self.discord.acked_in_session.remove(&message.channel_id);
+                self.invalidate_unread_cache();
                 self.discord
                     .messages
                     .entry(message.channel_id.clone())
@@ -467,6 +475,7 @@ impl AppState {
                         channel_id
                     );
                     self.discord.inaccessible_channels.insert(channel_id.clone());
+                    self.invalidate_unread_cache();
                 }
                 let pending = self.collect_pending_image_downloads(&messages);
                 self.discord.messages.insert(channel_id, messages);
@@ -483,6 +492,7 @@ impl AppState {
             } => {
                 if permanent {
                     self.discord.inaccessible_channels.insert(channel_id);
+                    self.invalidate_unread_cache();
                 }
                 Command::None
             }
@@ -703,6 +713,7 @@ impl AppState {
                     .insert(channel_id.clone(), Some(message_id.clone()));
                 self.discord.mention_counts.remove(&channel_id);
                 self.discord.acked_in_session.insert(channel_id.clone());
+                self.invalidate_unread_cache();
                 cmds.push(Command::AckChannel {
                     channel_id,
                     message_id,
@@ -914,11 +925,22 @@ impl AppState {
         true
     }
 
-    /// 未読チャンネル一覧を取得 (ソート済み、メッセージ可能なもののみ)。
-    /// セッション内で既読化したものもグレーアウト表示用に含める。
-    /// 権限なし (inaccessible_channels) のチャンネルは除外する。
+    /// 未読チャンネル一覧を取得。キャッシュ済みの ID 列を Channel 参照に解決して返す。
+    /// 描画前に `refresh_unread_cache()` が呼ばれていることを前提とする。
     pub fn get_unread_channels(&self) -> Vec<&Channel> {
-        let mut unread: Vec<&Channel> = self
+        self.discord
+            .unread_cache
+            .iter()
+            .filter_map(|id| self.discord.channels.get(id))
+            .collect()
+    }
+
+    /// 未読リストのキャッシュを再計算する。dirty フラグが立っているときだけ走る。
+    pub fn refresh_unread_cache(&mut self) {
+        if !self.discord.unread_cache_dirty {
+            return;
+        }
+        let mut entries: Vec<&Channel> = self
             .discord
             .channels
             .values()
@@ -929,11 +951,17 @@ impl AppState {
                         || self.discord.acked_in_session.contains(&ch.id))
             })
             .collect();
-        unread.sort_by(|a, b| match a.channel_type.cmp(&b.channel_type) {
+        entries.sort_by(|a, b| match a.channel_type.cmp(&b.channel_type) {
             std::cmp::Ordering::Equal => a.display_name().cmp(&b.display_name()),
             other => other,
         });
-        unread
+        self.discord.unread_cache = entries.iter().map(|c| c.id.clone()).collect();
+        self.discord.unread_cache_dirty = false;
+    }
+
+    /// 未読リストキャッシュを無効化する (状態変化が起きたとき)
+    fn invalidate_unread_cache(&mut self) {
+        self.discord.unread_cache_dirty = true;
     }
 
     /// チャンネルを検索（名前・ギルド名でフィルタリング）

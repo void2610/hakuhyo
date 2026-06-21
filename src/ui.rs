@@ -13,6 +13,9 @@ use ratatui_image::{CropOptions, Resize, StatefulImage};
 
 /// TUIを描画
 pub fn render(frame: &mut Frame, app: &mut AppState) {
+    // 未読リストキャッシュを (必要なら) 再計算してから描画
+    app.refresh_unread_cache();
+
     // メインレイアウト: 左サイドバー | 右コンテンツ
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
