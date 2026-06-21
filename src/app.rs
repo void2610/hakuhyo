@@ -2,12 +2,18 @@ use crate::discord::{Channel, Guild, Message, User};
 use crate::events::AppEvent;
 use crossterm::event::KeyCode;
 use ratatui::widgets::ListState;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
+// ratatui-image 2.x では StatefulProtocol は trait なので Box<dyn ...> で保持する
+type BoxedImageProtocol = Box<dyn StatefulProtocol>;
 use std::collections::{HashMap, HashSet};
 
 /// アプリケーション全体の状態
 pub struct AppState {
     pub discord: DiscordState,
     pub ui: UiState,
+    /// 画像表示用 Picker (起動時にターミナル能力を問い合わせて作成)
+    pub picker: Option<Picker>,
 }
 
 /// Discord関連の状態
@@ -18,6 +24,23 @@ pub struct DiscordState {
     pub users: HashMap<String, User>,            // user_id -> user (DM表示用)
     pub current_user: Option<User>,
     pub connected: bool,
+    /// attachment_id -> (area_w_cells, 最後に使った clip_top, 描画用プロトコル)
+    /// clip_top: None = 完全表示 (Fit) で使用中、Some(bool) = Crop モードで使用中
+    /// CropOptions の切り替え時に ratatui-image 側で再 encode が起きないため、
+    /// 切り替え検知のためにここで保持する
+    pub image_protocols: HashMap<String, (u16, Option<bool>, BoxedImageProtocol)>,
+    /// attachment_id -> area_w に合わせてリサイズ済みの画像 (両端クロップ時のフォールバック用)
+    pub image_resized: HashMap<String, (u16, image::DynamicImage)>,
+    /// attachment_id -> (area_w, hidden_top_cells, visible_cells, 両端クロップ用 protocol)
+    /// 同一可視領域の再描画では再生成しないよう直近 1 枚をキャッシュする
+    pub image_partial_protocols:
+        HashMap<String, (u16, u32, u32, BoxedImageProtocol)>,
+    /// attachment_id -> 元画像 (リサイズの再生成元)
+    pub image_sources: HashMap<String, image::DynamicImage>,
+    /// ダウンロード中の attachment_id
+    pub image_downloading: HashSet<String>,
+    /// 過去メッセージ追加読み込み中の channel_id (重複防止)
+    pub loading_older: HashSet<String>,
 }
 
 /// UI関連の状態
@@ -32,6 +55,11 @@ pub struct UiState {
     pub favorites: HashSet<String>,     // お気に入りチャンネルID
     pub search_mode: bool,               // 検索モードフラグ
     pub search_buffer: String,           // 検索クエリ
+    // メッセージリストのスクロール位置 (最新基準のオフセット行数)
+    pub message_scroll_offset: usize,
+    /// 描画時に計算した scroll_offset の上限 (ui.rs から書き戻し)。
+    /// 最古到達判定 (apply_scroll 時の過去ロード起動) に使う。
+    pub cached_max_scroll_offset: usize,
 }
 
 /// 入力モード
@@ -45,8 +73,12 @@ pub enum InputMode {
 #[derive(Debug, Clone)]
 pub enum Command {
     LoadMessages(String),
+    /// 指定 message_id より古いメッセージを追加読み込み
+    LoadOlderMessages { channel_id: String, before: String },
     SendMessage { channel_id: String, content: String },
     OpenInDiscord { guild_id: Option<String>, channel_id: String },
+    /// 画像添付ファイルのダウンロード (attachment_id, url)
+    DownloadImages(Vec<(String, String)>),
     None,
 }
 
@@ -61,6 +93,12 @@ impl AppState {
                 users: HashMap::new(),
                 current_user: None,
                 connected: false,
+                image_protocols: HashMap::new(),
+                image_resized: HashMap::new(),
+                image_partial_protocols: HashMap::new(),
+                image_sources: HashMap::new(),
+                image_downloading: HashSet::new(),
+                loading_older: HashSet::new(),
             },
             ui: UiState {
                 selected_channel: None,
@@ -71,8 +109,47 @@ impl AppState {
                 favorites: HashSet::new(),
                 search_mode: false,
                 search_buffer: String::new(),
+                message_scroll_offset: 0,
+                cached_max_scroll_offset: 0,
             },
+            picker: None,
         }
+    }
+
+    /// 描画用 Picker を設定
+    pub fn set_picker(&mut self, picker: Option<Picker>) {
+        self.picker = picker;
+    }
+
+    /// メッセージ内の画像 attachment のうち、まだ未ダウンロード/未進行のものをキューに入れる。
+    /// 返り値はダウンロード対象 (attachment_id, url) のリスト。
+    fn collect_pending_image_downloads(
+        &mut self,
+        messages: &[Message],
+    ) -> Vec<(String, String)> {
+        let mut to_download = Vec::new();
+        for msg in messages {
+            for att in &msg.attachments {
+                let is_image = att
+                    .content_type
+                    .as_deref()
+                    .is_some_and(|ct| ct.starts_with("image/"));
+                if !is_image {
+                    continue;
+                }
+                // image_sources にあれば既にデコード済み (protocols は描画時に生成されるため未生成でも skip)
+                if self.discord.image_sources.contains_key(&att.id)
+                    || self.discord.image_downloading.contains(&att.id)
+                {
+                    continue;
+                }
+                if let Some(url) = &att.url {
+                    self.discord.image_downloading.insert(att.id.clone());
+                    to_download.push((att.id.clone(), url.clone()));
+                }
+            }
+        }
+        to_download
     }
 
     /// お気に入り設定を読み込み
@@ -257,13 +334,17 @@ impl AppState {
             }
 
             AppEvent::MessageCreate(message) => {
-                // メッセージを追加
+                let pending = self.collect_pending_image_downloads(std::slice::from_ref(&message));
                 self.discord
                     .messages
                     .entry(message.channel_id.clone())
                     .or_default()
                     .push(message);
-                Command::None
+                if pending.is_empty() {
+                    Command::None
+                } else {
+                    Command::DownloadImages(pending)
+                }
             }
 
             AppEvent::MessageUpdate(message) => {
@@ -289,13 +370,59 @@ impl AppState {
                 channel_id,
                 messages,
             } => {
+                let pending = self.collect_pending_image_downloads(&messages);
                 self.discord.messages.insert(channel_id, messages);
+                if pending.is_empty() {
+                    Command::None
+                } else {
+                    Command::DownloadImages(pending)
+                }
+            }
+
+            AppEvent::AttachmentImageLoaded { attachment_id, image } => {
+                self.discord.image_downloading.remove(&attachment_id);
+                // protocol / resized キャッシュは描画時に area_w が判明してから生成する
+                self.discord.image_sources.insert(attachment_id, *image);
+                Command::None
+            }
+            AppEvent::AttachmentImageFailed { attachment_id } => {
+                self.discord.image_downloading.remove(&attachment_id);
                 Command::None
             }
 
             AppEvent::MessageSent(message) => {
                 // メッセージ送信後にメッセージリストを再読み込みして最新の状態を取得
+                self.ui.message_scroll_offset = 0;
                 Command::LoadMessages(message.channel_id)
+            }
+
+            AppEvent::ScrollMessages(delta) => {
+                self.apply_scroll(delta);
+                if delta > 0 {
+                    // 上方向 (古い側) かつ最古到達時のみ追加読み込みを起動
+                    self.maybe_load_older_messages_if_at_top()
+                } else {
+                    Command::None
+                }
+            }
+
+            AppEvent::OlderMessagesLoaded {
+                channel_id,
+                messages,
+            } => {
+                self.discord.loading_older.remove(&channel_id);
+                let pending = self.collect_pending_image_downloads(&messages);
+                // 未初期化チャンネルでも取得結果が破棄されないよう entry().or_default() で挿入
+                self.discord
+                    .messages
+                    .entry(channel_id)
+                    .or_default()
+                    .extend(messages);
+                if pending.is_empty() {
+                    Command::None
+                } else {
+                    Command::DownloadImages(pending)
+                }
             }
 
             // UI イベント
@@ -331,6 +458,7 @@ impl AppState {
                 KeyCode::Enter => {
                     // チャンネル選択確定して検索モードを終了
                     self.toggle_search_mode();
+                    self.ui.message_scroll_offset = 0;
                     if let Some(channel_id) = &self.ui.selected_channel {
                         Command::LoadMessages(channel_id.clone())
                     } else {
@@ -363,6 +491,14 @@ impl AppState {
                     self.toggle_favorite();
                     Command::None
                 }
+                KeyCode::Char('e') => {
+                    self.apply_scroll(1);
+                    self.maybe_load_older_messages_if_at_top()
+                }
+                KeyCode::Char('d') => {
+                    self.apply_scroll(-1);
+                    Command::None
+                }
                 KeyCode::Char('o') => {
                     // 現在のチャンネルを Discord アプリで開く
                     if let Some(channel_id) = &self.ui.selected_channel {
@@ -383,6 +519,7 @@ impl AppState {
                 KeyCode::Down | KeyCode::Char('j') => self.select_next_channel(),
                 KeyCode::Enter => {
                     // チャンネル選択確定
+                    self.ui.message_scroll_offset = 0;
                     if let Some(channel_id) = &self.ui.selected_channel {
                         Command::LoadMessages(channel_id.clone())
                     } else {
@@ -455,6 +592,7 @@ impl AppState {
 
         self.ui.channel_list_state.select(Some(new_index));
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
+        self.ui.message_scroll_offset = 0;
 
         // チャンネル切り替え時に自動的にメッセージを読み込む
         Command::LoadMessages(channel_ids[new_index].clone())
@@ -481,9 +619,54 @@ impl AppState {
 
         self.ui.channel_list_state.select(Some(new_index));
         self.ui.selected_channel = Some(channel_ids[new_index].clone());
+        self.ui.message_scroll_offset = 0;
 
         // チャンネル切り替え時に自動的にメッセージを読み込む
         Command::LoadMessages(channel_ids[new_index].clone())
+    }
+
+    /// スクロール位置が直近に描画した上限 (= 最古メッセージが画面に出ている) に
+    /// 達したときだけ過去メッセージ読み込みを起動する。
+    fn maybe_load_older_messages_if_at_top(&mut self) -> Command {
+        if self.ui.message_scroll_offset < self.ui.cached_max_scroll_offset {
+            return Command::None;
+        }
+        self.maybe_load_older_messages()
+    }
+
+    /// 古い側にスクロールしたとき、必要なら追加メッセージ読み込みを起動する。
+    /// 既に読み込み中、または最古メッセージが未取得の場合は何もしない。
+    fn maybe_load_older_messages(&mut self) -> Command {
+        let Some(channel_id) = self.ui.selected_channel.clone() else {
+            return Command::None;
+        };
+        if self.discord.loading_older.contains(&channel_id) {
+            return Command::None;
+        }
+        let Some(messages) = self.discord.messages.get(&channel_id) else {
+            return Command::None;
+        };
+        // REST は新→古順なので、配列の末尾が最古
+        let Some(oldest) = messages.last() else {
+            return Command::None;
+        };
+        let before = oldest.id.clone();
+        self.discord.loading_older.insert(channel_id.clone());
+        log::debug!("Loading older messages for {} before {}", channel_id, before);
+        Command::LoadOlderMessages { channel_id, before }
+    }
+
+    /// メッセージリストを行単位でスクロール (正: 古い側 / 負: 新しい側)。
+    /// 上限のクランプはレイアウト依存のため ui.rs 側で行う。
+    fn apply_scroll(&mut self, delta: i32) {
+        if delta > 0 {
+            self.ui.message_scroll_offset =
+                self.ui.message_scroll_offset.saturating_add(delta as usize);
+        } else if delta < 0 {
+            self.ui.message_scroll_offset =
+                self.ui.message_scroll_offset.saturating_sub((-delta) as usize);
+        }
+        log::debug!("Scroll offset: {}", self.ui.message_scroll_offset);
     }
 
     /// チャンネルリストを取得（ソート済み、メッセージ可能なもののみ）

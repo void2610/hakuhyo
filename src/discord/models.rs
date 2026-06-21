@@ -8,6 +8,9 @@ pub struct User {
     pub discriminator: String,
     #[serde(default)]
     pub avatar: Option<String>,
+    /// グローバル表示名 (旧 discriminator 廃止後の新表示名)
+    #[serde(default)]
+    pub global_name: Option<String>,
 }
 
 /// 添付ファイル情報
@@ -58,6 +61,33 @@ pub struct Message {
     pub edited_timestamp: Option<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// ギルドメンバー情報 (サーバー内発言時にニックネームを含む)
+    #[serde(default)]
+    pub member: Option<MessageMember>,
+}
+
+/// メッセージに付与される partial guild member
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MessageMember {
+    #[serde(default)]
+    pub nick: Option<String>,
+}
+
+impl Message {
+    /// 表示用の作者名を取得 (サーバーニックネーム → global_name → username の優先順)
+    pub fn author_display_name(&self) -> &str {
+        if let Some(nick) = self.member.as_ref().and_then(|m| m.nick.as_deref()) {
+            if !nick.is_empty() {
+                return nick;
+            }
+        }
+        if let Some(global) = self.author.global_name.as_deref() {
+            if !global.is_empty() {
+                return global;
+            }
+        }
+        &self.author.username
+    }
 }
 
 /// チャンネル情報

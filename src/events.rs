@@ -3,6 +3,7 @@ use crossterm::event::KeyCode;
 
 /// アプリケーションイベント
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AppEvent {
     // UI イベント
     /// キー入力
@@ -35,6 +36,20 @@ pub enum AppEvent {
     },
     /// メッセージ送信完了
     MessageSent(Message),
+    /// 過去のメッセージを追加で読み込み完了
+    OlderMessagesLoaded {
+        channel_id: String,
+        messages: Vec<Message>,
+    },
+    /// メッセージリストを行単位でスクロール (正: 古い側へ / 負: 新しい側へ)
+    ScrollMessages(i32),
+    /// 画像添付ファイルのデコード完了 (DynamicImage は重いので Box で包む)
+    AttachmentImageLoaded {
+        attachment_id: String,
+        image: Box<image::DynamicImage>,
+    },
+    /// 画像添付ファイルのダウンロード/デコード失敗 (再試行可能にするためロック解除用)
+    AttachmentImageFailed { attachment_id: String },
 
     // システムイベント
     /// 定期的な描画更新

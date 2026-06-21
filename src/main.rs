@@ -17,6 +17,7 @@ use discord::{DiscordRestClient, GatewayClient, GatewayEvent};
 use events::AppEvent;
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui_image::picker::Picker;
 use std::io;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
@@ -59,13 +60,25 @@ async fn main() -> anyhow::Result<()> {
 
     // ターミナル初期化（認証完了後）
     enable_raw_mode()?;
+    // Picker は termios でフォントサイズを取得し、環境変数からプロトコルを推測
+    let picker = match Picker::from_termios() {
+        Ok(mut p) => {
+            let proto = p.guess_protocol();
+            log::info!("Image picker initialized: protocol={:?}", proto);
+            Some(p)
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize image picker: {} — image rendering disabled", e);
+            None
+        }
+    };
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     // アプリケーションを実行し、終了するまで待機
-    let result = run_app(&mut terminal, token).await;
+    let result = run_app(&mut terminal, token, picker).await;
 
     // ターミナル復元
     disable_raw_mode()?;
@@ -84,10 +97,12 @@ async fn main() -> anyhow::Result<()> {
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     token: String,
+    picker: Option<Picker>,
 ) -> anyhow::Result<()> {
     log::info!("Initializing application state");
 
     let mut app = AppState::new();
+    app.set_picker(picker);
 
     // 設定ファイルを読み込み
     if let Ok(config) = config::load_config() {
@@ -151,6 +166,24 @@ async fn run_app(
                         let _ = ui_event_tx.send(AppEvent::Quit).await;
                         break;
                     }
+                    // Ctrl+U / Ctrl+D でメッセージを大きめにスクロール (行単位)
+                    if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key_event.code {
+                            KeyCode::Char('u') => {
+                                let _ = ui_event_tx
+                                    .send(AppEvent::ScrollMessages(10))
+                                    .await;
+                                continue;
+                            }
+                            KeyCode::Char('d') => {
+                                let _ = ui_event_tx
+                                    .send(AppEvent::ScrollMessages(-10))
+                                    .await;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     // 'q' で終了（Normal モード時のみ）
                     if key_event.code == KeyCode::Char('q') {
                         let _ = ui_event_tx.send(AppEvent::Quit).await;
@@ -197,13 +230,37 @@ async fn run_app(
             match command {
                 Command::LoadMessages(channel_id) => {
                     tokio::spawn(async move {
-                        if let Ok(messages) = rest.get_messages(&channel_id, 50).await {
+                        if let Ok(messages) = rest.get_messages(&channel_id, 50, None).await {
                             let _ = tx
                                 .send(AppEvent::MessagesLoaded {
                                     channel_id,
                                     messages,
                                 })
                                 .await;
+                        }
+                    });
+                }
+                Command::LoadOlderMessages { channel_id, before } => {
+                    tokio::spawn(async move {
+                        match rest.get_messages(&channel_id, 50, Some(&before)).await {
+                            Ok(messages) => {
+                                let _ = tx
+                                    .send(AppEvent::OlderMessagesLoaded {
+                                        channel_id,
+                                        messages,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to load older messages: {}", e);
+                                // 失敗時もロード中フラグを解除する (空の結果を送る)
+                                let _ = tx
+                                    .send(AppEvent::OlderMessagesLoaded {
+                                        channel_id,
+                                        messages: Vec::new(),
+                                    })
+                                    .await;
+                            }
                         }
                     });
                 }
@@ -216,6 +273,53 @@ async fn run_app(
                             let _ = tx.send(AppEvent::MessageSent(message)).await;
                         }
                     });
+                }
+                Command::DownloadImages(items) => {
+                    for (att_id, url) in items {
+                        let tx2 = tx.clone();
+                        tokio::spawn(async move {
+                            log::debug!("Downloading image: id={}, url={}", att_id, url);
+                            // 任意の段階で失敗したら Failed を送って image_downloading を必ず解除する
+                            let result: Result<image::DynamicImage, String> =
+                                match reqwest::get(&url).await {
+                                    Ok(resp) => match resp.bytes().await {
+                                        Ok(bytes) => {
+                                            match tokio::task::spawn_blocking(move || {
+                                                image::load_from_memory(&bytes)
+                                            })
+                                            .await
+                                            {
+                                                Ok(Ok(img)) => Ok(img),
+                                                Ok(Err(e)) => {
+                                                    Err(format!("decode failed: {}", e))
+                                                }
+                                                Err(e) => Err(format!("decode task panic: {}", e)),
+                                            }
+                                        }
+                                        Err(e) => Err(format!("read bytes failed: {}", e)),
+                                    },
+                                    Err(e) => Err(format!("download failed: {}", e)),
+                                };
+                            match result {
+                                Ok(img) => {
+                                    let _ = tx2
+                                        .send(AppEvent::AttachmentImageLoaded {
+                                            attachment_id: att_id,
+                                            image: Box::new(img),
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    log::warn!("Image fetch error ({}): {}", att_id, e);
+                                    let _ = tx2
+                                        .send(AppEvent::AttachmentImageFailed {
+                                            attachment_id: att_id,
+                                        })
+                                        .await;
+                                }
+                            }
+                        });
+                    }
                 }
                 Command::OpenInDiscord { guild_id, channel_id } => {
                     // discord://-/channels/<guild_or_@me>/<channel_id>
