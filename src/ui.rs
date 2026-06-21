@@ -32,18 +32,31 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
         ])
         .split(main_chunks[1]);
 
-    // 検索モードでない場合のみ、お気に入りリストを描画
+    // サイドバーを上下に分割: 上 = Favorites、下 = Unread
+    let sidebar_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(main_chunks[0]);
+
     if !app.ui.search_mode {
-        render_channel_list(frame, app, main_chunks[0]);
+        render_channel_list(frame, app, sidebar_chunks[0]);
+        render_unread_list(frame, app, sidebar_chunks[1]);
     } else {
-        // 検索モード時は空のお気に入りパネルを表示
-        let empty_list = List::new(Vec::<ListItem>::new()).block(
+        // 検索モード時はサイドバーを淡く表示
+        let placeholder = List::new(Vec::<ListItem>::new()).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Favorites")
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
-        frame.render_widget(empty_list, main_chunks[0]);
+        frame.render_widget(placeholder, sidebar_chunks[0]);
+        let placeholder2 = List::new(Vec::<ListItem>::new()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Unread")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        frame.render_widget(placeholder2, sidebar_chunks[1]);
     }
 
     // メッセージリストを描画
@@ -123,6 +136,55 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         .highlight_symbol(">> ");
 
     frame.render_stateful_widget(list, area, &mut app.ui.channel_list_state);
+}
+
+/// 未読チャンネル一覧を描画
+fn render_unread_list(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
+    let unread = app.get_unread_channels();
+    let title = format!("Unread ({})", unread.len());
+
+    let items: Vec<ListItem> = unread
+        .iter()
+        .map(|channel| {
+            let prefix = channel.type_prefix();
+            let name = channel.display_name();
+
+            let guild_name = channel
+                .guild_id
+                .as_ref()
+                .and_then(|gid| app.discord.guilds.get(gid))
+                .map(|g| format!("[{}] ", g.name))
+                .unwrap_or_default();
+
+            let parent_name = channel
+                .parent_id
+                .as_ref()
+                .and_then(|pid| app.discord.channels.get(pid))
+                .map(|parent| format!("{} > ", parent.display_name()))
+                .unwrap_or_default();
+
+            let content = format!("• {}{}{}{}", guild_name, parent_name, prefix, name);
+
+            let style = if Some(&channel.id) == app.ui.selected_channel.as_ref() {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Red)
+            };
+
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
+
+    frame.render_widget(list, area);
 }
 
 /// メッセージリストを描画

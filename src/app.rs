@@ -41,6 +41,8 @@ pub struct DiscordState {
     pub image_downloading: HashSet<String>,
     /// 過去メッセージ追加読み込み中の channel_id (重複防止)
     pub loading_older: HashSet<String>,
+    /// channel_id -> 最後に既読化した message_id (未読判定用)
+    pub read_states: HashMap<String, Option<String>>,
 }
 
 /// UI関連の状態
@@ -99,6 +101,7 @@ impl AppState {
                 image_sources: HashMap::new(),
                 image_downloading: HashSet::new(),
                 loading_older: HashSet::new(),
+                read_states: HashMap::new(),
             },
             ui: UiState {
                 selected_channel: None,
@@ -236,6 +239,23 @@ impl AppState {
                     }
                 }
 
+                // read_state エントリを抽出 (チャンネル毎の既読位置)
+                // READY での read_state は { "entries": [...], "version": .. } の形か
+                // 旧 API の直接配列の場合がある
+                let read_entries = ready_data
+                    .get("read_state")
+                    .and_then(|rs| rs.get("entries").and_then(|v| v.as_array()).or(rs.as_array()));
+                if let Some(entries) = read_entries {
+                    log::info!("READY contains {} read_state entries", entries.len());
+                    for entry in entries {
+                        if let Ok(rs) = serde_json::from_value::<crate::discord::ReadStateEntry>(
+                            entry.clone(),
+                        ) {
+                            self.discord.read_states.insert(rs.id, rs.last_message_id);
+                        }
+                    }
+                }
+
                 // DM チャンネルを抽出
                 if let Some(private_channels) = ready_data.get("private_channels").and_then(|v| v.as_array()) {
                     log::info!("Found {} private channels", private_channels.len());
@@ -335,6 +355,10 @@ impl AppState {
 
             AppEvent::MessageCreate(message) => {
                 let pending = self.collect_pending_image_downloads(std::slice::from_ref(&message));
+                // 該当チャンネルの last_message_id を更新 (未読判定用)
+                if let Some(channel) = self.discord.channels.get_mut(&message.channel_id) {
+                    channel.last_message_id = Some(message.id.clone());
+                }
                 self.discord
                     .messages
                     .entry(message.channel_id.clone())
@@ -706,6 +730,33 @@ impl AppState {
         favorites
     }
 
+    /// チャンネルが未読かどうか (snowflake は単調増加なので文字列長で比較してから辞書順比較)
+    pub fn is_channel_unread(&self, channel: &Channel) -> bool {
+        let Some(last) = channel.last_message_id.as_deref() else {
+            return false;
+        };
+        match self.discord.read_states.get(&channel.id) {
+            Some(Some(read)) => snowflake_gt(last, read.as_str()),
+            // read state が無い or 未読位置不明 → 未読扱い
+            _ => true,
+        }
+    }
+
+    /// 未読チャンネル一覧を取得 (ソート済み、メッセージ可能なもののみ)
+    pub fn get_unread_channels(&self) -> Vec<&Channel> {
+        let mut unread: Vec<&Channel> = self
+            .discord
+            .channels
+            .values()
+            .filter(|ch| ch.is_messageable() && self.is_channel_unread(ch))
+            .collect();
+        unread.sort_by(|a, b| match a.channel_type.cmp(&b.channel_type) {
+            std::cmp::Ordering::Equal => a.display_name().cmp(&b.display_name()),
+            other => other,
+        });
+        unread
+    }
+
     /// チャンネルを検索（名前・ギルド名でフィルタリング）
     pub fn search_channels(&self, query: &str) -> Vec<&Channel> {
         if query.is_empty() {
@@ -829,5 +880,14 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Discord snowflake ID (数値文字列) の大小比較。a > b なら true
+fn snowflake_gt(a: &str, b: &str) -> bool {
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => a > b,
     }
 }
