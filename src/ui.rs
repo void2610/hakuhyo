@@ -9,7 +9,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
-use ratatui_image::picker::Picker;
 use ratatui_image::{CropOptions, Resize, StatefulImage};
 
 /// TUIを描画
@@ -354,20 +353,50 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
             let two_sided = hidden_top_cells > 0 && hidden_bottom_cells > 0;
 
             if two_sided {
-                // 上下両方が切れる (画像が画面より大きい) ケースは ratatui-image の Crop では
-                // 片側しか指定できないため、自前で resized 画像からピクセル単位にクロップする
-                if let Some((_, resized)) = app.discord.image_resized.get(att_id) {
-                    if let Some(picker) = app.picker.as_mut() {
-                        render_partial_image(
-                            frame,
-                            picker,
-                            resized,
-                            img_area,
-                            hidden_top_cells,
-                            visible_h as u32,
-                            *img_h as u32,
-                        );
+                // 上下両方が切れる (画像が画面より大きい) ケースは Resize::Crop では片側しか
+                // 指定できないため自前クロップ。同一 (area_w, hidden_top, visible) のときは
+                // 直近の protocol を再利用してエンコードを省略する。
+                let visible_cells = visible_h as u32;
+                let cached_match = app
+                    .discord
+                    .image_partial_protocols
+                    .get(att_id)
+                    .map(|(cw, ch, cv, _)| {
+                        *cw == area_w && *ch == hidden_top_cells && *cv == visible_cells
+                    })
+                    .unwrap_or(false);
+                if !cached_match {
+                    if let (Some((_, resized)), Some(picker)) =
+                        (app.discord.image_resized.get(att_id), app.picker.as_mut())
+                    {
+                        let w = resized.width();
+                        let h_px = resized.height();
+                        let img_h_cells = *img_h as u32;
+                        if w > 0 && h_px > 0 && img_h_cells > 0 && visible_cells > 0 {
+                            let crop_y = ((hidden_top_cells as u64 * h_px as u64)
+                                / img_h_cells as u64)
+                                .min(h_px as u64)
+                                as u32;
+                            let crop_h_raw =
+                                (visible_cells as u64 * h_px as u64) / img_h_cells as u64;
+                            let crop_h =
+                                (crop_h_raw as u32).min(h_px.saturating_sub(crop_y));
+                            if crop_h > 0 {
+                                let cropped = resized.crop_imm(0, crop_y, w, crop_h);
+                                let protocol = picker.new_resize_protocol(cropped);
+                                app.discord.image_partial_protocols.insert(
+                                    att_id.clone(),
+                                    (area_w, hidden_top_cells, visible_cells, protocol),
+                                );
+                            }
+                        }
                     }
+                }
+                if let Some((_, _, _, protocol)) =
+                    app.discord.image_partial_protocols.get_mut(att_id)
+                {
+                    let widget = StatefulImage::new(None);
+                    frame.render_stateful_widget(widget, img_area, protocol);
                 }
             } else {
                 let desired_clip_top: Option<bool> = if partial {
@@ -418,38 +447,6 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
     }
 }
 
-
-/// 画像が画面の上下両方にはみ出すとき、resized 画像からピクセル単位でクロップして描画する。
-fn render_partial_image(
-    frame: &mut Frame,
-    picker: &mut Picker,
-    resized: &image::DynamicImage,
-    area: Rect,
-    hidden_top_cells: u32,
-    visible_cells: u32,
-    img_h_cells: u32,
-) {
-    if visible_cells == 0 || img_h_cells == 0 {
-        return;
-    }
-    let w = resized.width();
-    let h = resized.height();
-    if w == 0 || h == 0 {
-        return;
-    }
-    // hidden_top, visible を「画像ピクセル」へ比例変換 (完全表示時の縮率と一致させる)
-    let crop_y =
-        ((hidden_top_cells as u64 * h as u64) / img_h_cells as u64).min(h as u64) as u32;
-    let crop_h_raw = (visible_cells as u64 * h as u64) / img_h_cells as u64;
-    let crop_h = (crop_h_raw as u32).min(h.saturating_sub(crop_y));
-    if crop_h == 0 {
-        return;
-    }
-    let cropped = resized.crop_imm(0, crop_y, w, crop_h);
-    let mut protocol = picker.new_resize_protocol(cropped);
-    let widget = StatefulImage::new(None);
-    frame.render_stateful_widget(widget, area, &mut protocol);
-}
 
 /// 1メッセージ分のテキスト行を構築
 fn build_message_line(msg: &Message) -> Line<'_> {

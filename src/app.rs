@@ -31,6 +31,10 @@ pub struct DiscordState {
     pub image_protocols: HashMap<String, (u16, Option<bool>, BoxedImageProtocol)>,
     /// attachment_id -> area_w に合わせてリサイズ済みの画像 (両端クロップ時のフォールバック用)
     pub image_resized: HashMap<String, (u16, image::DynamicImage)>,
+    /// attachment_id -> (area_w, hidden_top_cells, visible_cells, 両端クロップ用 protocol)
+    /// 同一可視領域の再描画では再生成しないよう直近 1 枚をキャッシュする
+    pub image_partial_protocols:
+        HashMap<String, (u16, u32, u32, BoxedImageProtocol)>,
     /// attachment_id -> 元画像 (リサイズの再生成元)
     pub image_sources: HashMap<String, image::DynamicImage>,
     /// ダウンロード中の attachment_id
@@ -91,6 +95,7 @@ impl AppState {
                 connected: false,
                 image_protocols: HashMap::new(),
                 image_resized: HashMap::new(),
+                image_partial_protocols: HashMap::new(),
                 image_sources: HashMap::new(),
                 image_downloading: HashSet::new(),
                 loading_older: HashSet::new(),
