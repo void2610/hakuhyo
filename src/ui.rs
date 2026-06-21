@@ -621,7 +621,7 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: ratatui::layou
     } else {
         match app.ui.input_mode {
             InputMode::Normal => {
-                Span::raw(" q: Quit | i: Edit | /: Search | f: Fav | u/Tab: Unread | o: Open | e/^U d/^D: Scroll | ↑/k ↓/j ")
+                Span::raw(" q: Quit | i: Edit | /: Search | f: Fav | u/Tab: Switch list | o: Open | e/^U d/^D: Scroll | ↑/k ↓/j ")
             }
             InputMode::Editing => Span::raw(" Esc: Normal mode | Enter: Send message "),
         }
