@@ -594,10 +594,7 @@ impl AppState {
                     self.toggle_favorite();
                     Command::None
                 }
-                KeyCode::Tab | KeyCode::Char('u') => {
-                    self.toggle_sidebar_focus();
-                    Command::None
-                }
+                KeyCode::Tab | KeyCode::Char('u') => self.toggle_sidebar_focus(),
                 KeyCode::Char('e') => {
                     self.apply_scroll(1);
                     self.maybe_load_older_messages_if_at_top()
@@ -713,15 +710,28 @@ impl AppState {
         }
     }
 
-    /// サイドバーのフォーカスを切り替え (Tab / u キー用)
-    pub fn toggle_sidebar_focus(&mut self) {
+    /// サイドバーのフォーカスを切り替え (Tab / u キー用)。
+    /// 切り替え先の先頭チャンネルを自動選択してメッセージ画面も切り替える。
+    pub fn toggle_sidebar_focus(&mut self) -> Command {
         self.ui.sidebar_focus = match self.ui.sidebar_focus {
             SidebarFocus::Favorites => SidebarFocus::Unread,
             SidebarFocus::Unread => SidebarFocus::Favorites,
         };
-        // 切り替え後のリスト先頭に位置を合わせる
         self.ui.channel_list_state.select(Some(0));
         log::debug!("Sidebar focus: {:?}", self.ui.sidebar_focus);
+
+        // 切り替え先の先頭チャンネルがあれば、それを選択してメッセージをロード
+        let next_channel = self
+            .get_current_display_channels()
+            .first()
+            .map(|ch| ch.id.clone());
+        if let Some(channel_id) = next_channel {
+            self.ui.selected_channel = Some(channel_id.clone());
+            self.ui.message_scroll_offset = 0;
+            self.select_channel_commands(channel_id)
+        } else {
+            Command::None
+        }
     }
 
     /// 前のチャンネルを選択
