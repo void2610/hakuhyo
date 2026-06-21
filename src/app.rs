@@ -56,6 +56,11 @@ pub struct DiscordState {
     /// REST で取得できなかった (権限がない可能性が高い) チャンネル。
     /// 未読リスト表示から除外する。
     pub inaccessible_channels: HashSet<String>,
+    /// 起動後に新着メッセージを受けたが未読化マークが立ったままのチャンネル ID。
+    /// READY 時の read_state にエントリが無いチャンネルでも、新着があれば未読扱いにするため
+    /// に使う (read_state の存在チェックでは検知できないケースを補う)。
+    /// ack 発火時にクリアする。
+    pub session_unread: HashSet<String>,
     /// 直近に計算した未読チャンネル ID 一覧 (ソート済み)。
     /// 100ms 周期の Tick 描画で毎回 sort を走らせないためのキャッシュ。
     pub unread_cache: Vec<String>,
@@ -138,6 +143,7 @@ impl AppState {
                 muted_channels: HashSet::new(),
                 acked_in_session: HashSet::new(),
                 inaccessible_channels: HashSet::new(),
+                session_unread: HashSet::new(),
                 unread_cache: Vec::new(),
                 unread_cache_dirty: true,
             },
@@ -424,8 +430,12 @@ impl AppState {
                 if let Some(channel) = self.discord.channels.get_mut(&message.channel_id) {
                     channel.last_message_id = Some(message.id.clone());
                 }
-                // 新着が来たら「セッション中既読化済み」フラグを解除し、通常の未読に戻す
+                // 新着が来たら既読化フラグを解除し、未読マークを立てる
                 self.discord.acked_in_session.remove(&message.channel_id);
+                // 現在開いているチャンネルへの新着は自動既読扱いとする (UI上で見えているので)
+                if self.ui.selected_channel.as_deref() != Some(message.channel_id.as_str()) {
+                    self.discord.session_unread.insert(message.channel_id.clone());
+                }
                 self.invalidate_unread_cache();
                 self.discord
                     .messages
@@ -712,6 +722,7 @@ impl AppState {
                     .read_states
                     .insert(channel_id.clone(), Some(message_id.clone()));
                 self.discord.mention_counts.remove(&channel_id);
+                self.discord.session_unread.remove(&channel_id);
                 self.discord.acked_in_session.insert(channel_id.clone());
                 self.invalidate_unread_cache();
                 cmds.push(Command::AckChannel {
@@ -901,15 +912,18 @@ impl AppState {
     /// チャンネルが未読かどうか。
     /// ミュート設定されている場合は基本的に未読扱いしないが、@メンションがある場合は例外。
     pub fn is_channel_unread(&self, channel: &Channel) -> bool {
-        let Some(last) = channel.last_message_id.as_deref() else {
+        if channel.last_message_id.is_none() {
             return false;
-        };
-        let new_messages = match self.discord.read_states.get(&channel.id) {
-            Some(Some(read)) => snowflake_gt(last, read.as_str()),
-            // read state エントリが無ければ既読扱い (普段触れていないチャンネル)
-            _ => false,
-        };
-        if !new_messages {
+        }
+        let last = channel.last_message_id.as_deref().unwrap();
+        // 起動後に新着があったチャンネルは無条件に未読 (read_state エントリの有無に依存しない)
+        let session_new = self.discord.session_unread.contains(&channel.id);
+        // 起動時点の read_state 比較。エントリ無しは「触れていない」= 既読扱い
+        let stored_new = matches!(
+            self.discord.read_states.get(&channel.id),
+            Some(Some(read)) if snowflake_gt(last, read.as_str())
+        );
+        if !session_new && !stored_new {
             return false;
         }
         // ミュート時はメンションがある場合のみ未読扱い
