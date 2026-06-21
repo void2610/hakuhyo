@@ -82,6 +82,10 @@ pub struct UiState {
     pub search_buffer: String,           // 検索クエリ
     // メッセージリストのスクロール位置 (最新基準のオフセット行数)
     pub message_scroll_offset: usize,
+    /// channel_id -> その channel を開いた瞬間の last_read_message_id (区切り線描画用)
+    /// ack で read_states が更新されても、ここの値は変わらないので
+    /// チャンネルを開いている間は境界が固定される
+    pub unread_boundaries: HashMap<String, String>,
     /// 描画時に計算した scroll_offset の上限 (ui.rs から書き戻し)。
     /// 最古到達判定 (apply_scroll 時の過去ロード起動) に使う。
     pub cached_max_scroll_offset: usize,
@@ -159,6 +163,7 @@ impl AppState {
                 message_scroll_offset: 0,
                 cached_max_scroll_offset: 0,
                 sidebar_focus: SidebarFocus::Favorites,
+                unread_boundaries: HashMap::new(),
             },
             picker: None,
         }
@@ -705,6 +710,13 @@ impl AppState {
     /// LoadMessages に加えて、未読がある場合は ack も同時に発火する
     /// (REST のメッセージ取得結果に依存せず、READY 由来の last_message_id を使う)。
     fn select_channel_commands(&mut self, channel_id: String) -> Command {
+        // 開いた瞬間の last_read を境界として保存 (ack より前のスナップショット)
+        if let Some(Some(last_read)) = self.discord.read_states.get(&channel_id) {
+            self.ui
+                .unread_boundaries
+                .insert(channel_id.clone(), last_read.clone());
+        }
+
         let last_msg = self
             .discord
             .channels
@@ -894,6 +906,11 @@ impl AppState {
         });
 
         favorites
+    }
+
+    /// snowflake 比較ヘルパ (ui.rs から境界判定で利用)
+    pub fn snowflake_gt(&self, a: &str, b: &str) -> bool {
+        snowflake_gt(a, b)
     }
 
     /// チャンネル or 親ギルドがミュートされているか

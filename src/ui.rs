@@ -373,8 +373,39 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         }
     }
 
+    // セパレータ挿入位置を判定。
+    // entries は新→古順なので、entries[i] が境界より新しく entries[i+1] が境界以前なら
+    // entries[i] の直上 (= 古い側のメッセージとの境目) にセパレータを描画する。
+    let boundary = app
+        .ui
+        .selected_channel
+        .as_deref()
+        .and_then(|cid| app.ui.unread_boundaries.get(cid).cloned());
+    let separator_at_index: Option<usize> = match boundary {
+        Some(b) => {
+            let mut found = None;
+            for (i, (msg, _, _)) in entries.iter().enumerate() {
+                let is_newer = app.snowflake_gt(&msg.id, b.as_str());
+                if is_newer {
+                    let next_is_newer = entries
+                        .get(i + 1)
+                        .map(|(next, _, _)| app.snowflake_gt(&next.id, b.as_str()))
+                        .unwrap_or(true);
+                    if !next_is_newer {
+                        found = Some(i);
+                        break;
+                    }
+                }
+            }
+            found
+        }
+        None => None,
+    };
+    let separator_height: u32 = if separator_at_index.is_some() { 1 } else { 0 };
+
     // 全体高さからスクロール offset の上限を決めてクランプ
-    let total_height: u32 = entries.iter().map(|(_, h, _)| *h as u32).sum();
+    let total_height: u32 =
+        entries.iter().map(|(_, h, _)| *h as u32).sum::<u32>() + separator_height;
     let max_offset = total_height.saturating_sub(inner.height as u32) as usize;
     let scroll_offset = app.ui.message_scroll_offset.min(max_offset);
     app.ui.message_scroll_offset = scroll_offset; // 過剰な offset をクランプして書き戻す
@@ -383,12 +414,16 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
     // 最新メッセージの底辺 y を求める。offset 0 で inner 下端ぴったり、offset>0 で下に押し下げる
     let mut y_bottom: i32 = inner_bottom + scroll_offset as i32;
 
-    for (msg, h, images) in entries.iter() {
+    for (idx, (msg, h, images)) in entries.iter().enumerate() {
         let y_top = y_bottom - *h as i32;
 
         // 画面下端より下にメッセージ全体がある場合 (offset 大きすぎ等) → skip して次へ
         if y_top >= inner_bottom {
-            y_bottom = y_top;
+            y_bottom = if Some(idx) == separator_at_index {
+                y_top - 1
+            } else {
+                y_top
+            };
             continue;
         }
         // 画面上端より上にメッセージ全体が抜けたら、これより古いメッセージは描画不要
@@ -527,8 +562,47 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
             img_y = img_bottom;
         }
 
-        y_bottom = y_top;
+        // このメッセージの直上 (古い側) に未読セパレータを置く場合は描画
+        if Some(idx) == separator_at_index {
+            let sep_y = y_top - 1;
+            if sep_y >= inner_top && sep_y < inner_bottom {
+                let sep_area = Rect {
+                    x: inner.x,
+                    y: sep_y as u16,
+                    width: inner.width,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(build_unread_separator_line(inner.width)),
+                    sep_area,
+                );
+            }
+            y_bottom = sep_y;
+        } else {
+            y_bottom = y_top;
+        }
     }
+}
+
+/// 未読/既読の境界線を表す 1 行を構築する
+fn build_unread_separator_line(width: u16) -> Line<'static> {
+    let label = " New messages ";
+    let label_w = label.chars().count() as u16;
+    let total_dashes = width.saturating_sub(label_w);
+    let left = (total_dashes / 2) as usize;
+    let right = (total_dashes - total_dashes / 2) as usize;
+    let line = format!(
+        "{}{}{}",
+        "─".repeat(left),
+        label,
+        "─".repeat(right)
+    );
+    Line::from(Span::styled(
+        line,
+        Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 
