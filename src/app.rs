@@ -128,7 +128,8 @@ impl AppState {
                 if !is_image {
                     continue;
                 }
-                if self.discord.image_protocols.contains_key(&att.id)
+                // image_sources にあれば既にデコード済み (protocols は描画時に生成されるため未生成でも skip)
+                if self.discord.image_sources.contains_key(&att.id)
                     || self.discord.image_downloading.contains(&att.id)
                 {
                     continue;
