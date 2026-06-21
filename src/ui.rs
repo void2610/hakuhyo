@@ -1,4 +1,4 @@
-use crate::app::{AppState, InputMode};
+use crate::app::{AppState, InputMode, SidebarFocus};
 use crate::discord::Message;
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthStr;
@@ -76,7 +76,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
 
 /// チャンネルリストを描画（お気に入り）
 fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
-    // 通常モード: お気に入りを表示
+    let focused = app.ui.sidebar_focus == SidebarFocus::Favorites;
     let favorites = app.get_favorite_channels();
 
     let items: Vec<ListItem> = favorites
@@ -85,7 +85,6 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
             let prefix = channel.type_prefix();
             let name = channel.display_name();
 
-            // ギルド名を取得
             let guild_name = if let Some(guild_id) = &channel.guild_id {
                 if let Some(guild) = app.discord.guilds.get(guild_id) {
                     format!("[{}] ", guild.name)
@@ -96,7 +95,6 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                 String::new()
             };
 
-            // スレッドの場合は親チャンネル名を併記
             let parent_name = channel
                 .parent_id
                 .as_ref()
@@ -104,10 +102,9 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                 .map(|parent| format!("{} > ", parent.display_name()))
                 .unwrap_or_default();
 
-            // お気に入りマークを追加
             let favorite_mark = "⭐ ";
-
-            let content = format!("{}{}{}{}{}", favorite_mark, guild_name, parent_name, prefix, name);
+            let content =
+                format!("{}{}{}{}{}", favorite_mark, guild_name, parent_name, prefix, name);
 
             let style = if Some(&channel.id) == app.ui.selected_channel.as_ref() {
                 Style::default()
@@ -121,12 +118,13 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         })
         .collect();
 
+    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Favorites")
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(border_color)),
         )
         .highlight_style(
             Style::default()
@@ -135,11 +133,16 @@ fn render_channel_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         )
         .highlight_symbol(">> ");
 
-    frame.render_stateful_widget(list, area, &mut app.ui.channel_list_state);
+    if focused {
+        frame.render_stateful_widget(list, area, &mut app.ui.channel_list_state);
+    } else {
+        frame.render_widget(list, area);
+    }
 }
 
 /// 未読チャンネル一覧を描画
-fn render_unread_list(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
+fn render_unread_list(frame: &mut Frame, app: &mut AppState, area: ratatui::layout::Rect) {
+    let focused = app.ui.sidebar_focus == SidebarFocus::Unread;
     let unread = app.get_unread_channels();
     let title = format!("Unread ({})", unread.len());
 
@@ -163,12 +166,16 @@ fn render_unread_list(frame: &mut Frame, app: &AppState, area: ratatui::layout::
                 .map(|parent| format!("{} > ", parent.display_name()))
                 .unwrap_or_default();
 
-            let content = format!("• {}{}{}{}", guild_name, parent_name, prefix, name);
+            let acked = app.discord.acked_in_session.contains(&channel.id);
+            let mark = if acked { "✓ " } else { "• " };
+            let content = format!("{}{}{}{}{}", mark, guild_name, parent_name, prefix, name);
 
             let style = if Some(&channel.id) == app.ui.selected_channel.as_ref() {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
+            } else if acked {
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default().fg(Color::Red)
             };
@@ -177,14 +184,26 @@ fn render_unread_list(frame: &mut Frame, app: &AppState, area: ratatui::layout::
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(Color::Magenta)),
-    );
+    let border_color = if focused { Color::Magenta } else { Color::DarkGray };
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
 
-    frame.render_widget(list, area);
+    if focused {
+        frame.render_stateful_widget(list, area, &mut app.ui.channel_list_state);
+    } else {
+        frame.render_widget(list, area);
+    }
 }
 
 /// メッセージリストを描画
@@ -599,7 +618,7 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: ratatui::layou
     } else {
         match app.ui.input_mode {
             InputMode::Normal => {
-                Span::raw(" q: Quit | i: Edit | /: Search | f: Fav | o: Open | e/^U: ScrollUp | d/^D: ScrollDown | ↑/k ↓/j ")
+                Span::raw(" q: Quit | i: Edit | /: Search | f: Fav | u/Tab: Unread | o: Open | e/^U d/^D: Scroll | ↑/k ↓/j ")
             }
             InputMode::Editing => Span::raw(" Esc: Normal mode | Enter: Send message "),
         }

@@ -256,13 +256,21 @@ fn dispatch_command(
         }
         Command::LoadMessages(channel_id) => {
             tokio::spawn(async move {
-                if let Ok(messages) = rest.get_messages(&channel_id, 50, None).await {
-                    let _ = tx
-                        .send(AppEvent::MessagesLoaded {
-                            channel_id,
-                            messages,
-                        })
-                        .await;
+                match rest.get_messages(&channel_id, 50, None).await {
+                    Ok(messages) => {
+                        let _ = tx
+                            .send(AppEvent::MessagesLoaded {
+                                channel_id,
+                                messages,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        log::warn!("LoadMessages failed for {}: {}", channel_id, e);
+                        let _ = tx
+                            .send(AppEvent::MessagesLoadFailed { channel_id })
+                            .await;
+                    }
                 }
             });
         }

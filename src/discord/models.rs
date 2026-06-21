@@ -83,6 +83,24 @@ pub struct ReadStateEntry {
     pub mention_count: u32,
 }
 
+/// READY イベント内 user_guild_settings エントリ (サーバー単位の通知設定)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserGuildSettingsEntry {
+    pub guild_id: Option<String>, // null は DM 設定
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub channel_overrides: Vec<ChannelOverride>,
+}
+
+/// チャンネル単位の通知 override
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelOverride {
+    pub channel_id: String,
+    #[serde(default)]
+    pub muted: bool,
+}
+
 impl Message {
     /// 表示用の作者名を取得 (サーバーニックネーム → global_name → username の優先順)
     pub fn author_display_name(&self) -> &str {

@@ -41,6 +41,8 @@ pub enum AppEvent {
         channel_id: String,
         messages: Vec<Message>,
     },
+    /// チャンネルのメッセージ取得が失敗 (権限なし等)
+    MessagesLoadFailed { channel_id: String },
     /// メッセージリストを行単位でスクロール (正: 古い側へ / 負: 新しい側へ)
     ScrollMessages(i32),
     /// 画像添付ファイルのデコード完了 (DynamicImage は重いので Box で包む)
