@@ -24,9 +24,12 @@ pub struct DiscordState {
     pub users: HashMap<String, User>,            // user_id -> user (DM表示用)
     pub current_user: Option<User>,
     pub connected: bool,
-    /// attachment_id -> 描画用プロトコル (キャッシュキーは area_w_cells)
-    pub image_protocols: HashMap<String, (u16, BoxedImageProtocol)>,
-    /// attachment_id -> area_w に合わせてリサイズ済みの画像 (部分描画クロップ用)
+    /// attachment_id -> (area_w_cells, 最後に使った clip_top, 描画用プロトコル)
+    /// clip_top: None = 完全表示 (Fit) で使用中、Some(bool) = Crop モードで使用中
+    /// CropOptions の切り替え時に ratatui-image 側で再 encode が起きないため、
+    /// 切り替え検知のためにここで保持する
+    pub image_protocols: HashMap<String, (u16, Option<bool>, BoxedImageProtocol)>,
+    /// attachment_id -> area_w に合わせてリサイズ済みの画像 (両端クロップ時のフォールバック用)
     pub image_resized: HashMap<String, (u16, image::DynamicImage)>,
     /// attachment_id -> 元画像 (リサイズの再生成元)
     pub image_sources: HashMap<String, image::DynamicImage>,

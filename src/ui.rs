@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 use ratatui_image::picker::Picker;
-use ratatui_image::StatefulImage;
+use ratatui_image::{CropOptions, Resize, StatefulImage};
 
 /// TUIを描画
 pub fn render(frame: &mut Frame, app: &mut AppState) {
@@ -260,7 +260,7 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         if let Some(picker) = app.picker.as_mut() {
             for (_, _, imgs) in entries.iter() {
                 for (att_id, _) in imgs {
-                    let cached_w = protocols.get(att_id).map(|(w, _)| *w);
+                    let cached_w = protocols.get(att_id).map(|(w, _, _)| *w);
                     if cached_w == Some(area_w) {
                         continue;
                     }
@@ -281,7 +281,7 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                         image::imageops::FilterType::Triangle,
                     );
                     let protocol = picker.new_resize_protocol(resized.clone());
-                    protocols.insert(att_id.clone(), (area_w, protocol));
+                    protocols.insert(att_id.clone(), (area_w, None, protocol));
                     resized_cache.insert(att_id.clone(), (area_w, resized));
                 }
             }
@@ -348,23 +348,63 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
             let hidden_bottom_cells = (img_bottom - visible_bottom) as u32;
             let partial = hidden_top_cells > 0 || hidden_bottom_cells > 0;
 
-            if !partial {
-                // 完全表示: キャッシュ済みプロトコルを使用 (area_w に揃ったリサイズ済み画像)
-                if let Some((_, protocol)) = app.discord.image_protocols.get_mut(att_id) {
-                    let widget = StatefulImage::new(None);
-                    frame.render_stateful_widget(widget, img_area, protocol);
+            let two_sided = hidden_top_cells > 0 && hidden_bottom_cells > 0;
+
+            if two_sided {
+                // 上下両方が切れる (画像が画面より大きい) ケースは ratatui-image の Crop では
+                // 片側しか指定できないため、自前で resized 画像からピクセル単位にクロップする
+                if let Some((_, resized)) = app.discord.image_resized.get(att_id) {
+                    if let Some(picker) = app.picker.as_mut() {
+                        render_partial_image(
+                            frame,
+                            picker,
+                            resized,
+                            img_area,
+                            hidden_top_cells,
+                            visible_h as u32,
+                            *img_h as u32,
+                        );
+                    }
                 }
-            } else if let Some((_, resized)) = app.discord.image_resized.get(att_id) {
-                if let Some(picker) = app.picker.as_mut() {
-                    render_partial_image(
-                        frame,
-                        picker,
-                        resized,
-                        img_area,
-                        hidden_top_cells,
-                        visible_h as u32,
-                        *img_h as u32,
-                    );
+            } else {
+                let desired_clip_top: Option<bool> = if partial {
+                    Some(hidden_top_cells > 0)
+                } else {
+                    None
+                };
+                // 前回の clip_top と違うなら protocol を作り直して内部の encode をリセット
+                // (ratatui-image は CropOptions の変化を needs_resize で検知できないため)
+                let needs_rebuild = app
+                    .discord
+                    .image_protocols
+                    .get(att_id)
+                    .map(|(_, last, _)| *last != desired_clip_top)
+                    .unwrap_or(false);
+                if needs_rebuild {
+                    if let (Some((_, resized)), Some(picker)) = (
+                        app.discord.image_resized.get(att_id),
+                        app.picker.as_mut(),
+                    ) {
+                        let new_protocol = picker.new_resize_protocol(resized.clone());
+                        if let Some(entry) = app.discord.image_protocols.get_mut(att_id) {
+                            entry.1 = desired_clip_top;
+                            entry.2 = new_protocol;
+                        }
+                    }
+                } else if let Some(entry) = app.discord.image_protocols.get_mut(att_id) {
+                    entry.1 = desired_clip_top;
+                }
+
+                if let Some((_, _, protocol)) = app.discord.image_protocols.get_mut(att_id) {
+                    let widget = if partial {
+                        StatefulImage::new(None).resize(Resize::Crop(Some(CropOptions {
+                            clip_top: hidden_top_cells > 0,
+                            clip_left: false,
+                        })))
+                    } else {
+                        StatefulImage::new(None)
+                    };
+                    frame.render_stateful_widget(widget, img_area, protocol);
                 }
             }
 
@@ -375,9 +415,8 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
     }
 }
 
-/// アスペクト保持で resize 済みの画像から、cell 比率に従ってクロップして描画する。
-/// クロップ量を「画像ピクセル × visible_cells / img_h_cells」で計算することで、
-/// 完全表示時のratatui-image内部の余白量と同比率になり、見た目の縮率が一致する。
+
+/// 画像が画面の上下両方にはみ出すとき、resized 画像からピクセル単位でクロップして描画する。
 fn render_partial_image(
     frame: &mut Frame,
     picker: &mut Picker,
@@ -395,6 +434,7 @@ fn render_partial_image(
     if w == 0 || h == 0 {
         return;
     }
+    // hidden_top, visible を「画像ピクセル」へ比例変換 (完全表示時の縮率と一致させる)
     let crop_y =
         ((hidden_top_cells as u64 * h as u64) / img_h_cells as u64).min(h as u64) as u32;
     let crop_h_raw = (visible_cells as u64 * h as u64) / img_h_cells as u64;
