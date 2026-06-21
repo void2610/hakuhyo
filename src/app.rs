@@ -81,6 +81,10 @@ pub enum Command {
     OpenInDiscord { guild_id: Option<String>, channel_id: String },
     /// 画像添付ファイルのダウンロード (attachment_id, url)
     DownloadImages(Vec<(String, String)>),
+    /// チャンネルの最新メッセージを既読化 (公式クライアントにも反映)
+    AckChannel { channel_id: String, message_id: String },
+    /// 複数 Command を一括発火 (例: 画像ダウンロード + ack)
+    Batch(Vec<Command>),
     None,
 }
 
@@ -395,11 +399,35 @@ impl AppState {
                 messages,
             } => {
                 let pending = self.collect_pending_image_downloads(&messages);
-                self.discord.messages.insert(channel_id, messages);
-                if pending.is_empty() {
-                    Command::None
-                } else {
-                    Command::DownloadImages(pending)
+                // ack 候補: REST レスポンスは新→古順なので先頭が最新
+                let ack_target = messages.first().map(|m| m.id.clone());
+                self.discord.messages.insert(channel_id.clone(), messages);
+
+                let mut cmds: Vec<Command> = Vec::new();
+                if !pending.is_empty() {
+                    cmds.push(Command::DownloadImages(pending));
+                }
+                if let Some(message_id) = ack_target {
+                    // 既に同じ最新で既読済みなら API を投げない
+                    let already_read = matches!(
+                        self.discord.read_states.get(&channel_id),
+                        Some(Some(read)) if read.as_str() == message_id.as_str()
+                    );
+                    if !already_read {
+                        // 楽観的に自前 read_states も更新 → 未読リストから即時消す
+                        self.discord
+                            .read_states
+                            .insert(channel_id.clone(), Some(message_id.clone()));
+                        cmds.push(Command::AckChannel {
+                            channel_id,
+                            message_id,
+                        });
+                    }
+                }
+                match cmds.len() {
+                    0 => Command::None,
+                    1 => cmds.into_iter().next().unwrap(),
+                    _ => Command::Batch(cmds),
                 }
             }
 

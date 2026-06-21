@@ -52,6 +52,35 @@ impl DiscordRestClient {
         self.post(&url, &payload).await
     }
 
+    /// メッセージを既読としてマークする (ユーザーアカウント用)
+    /// レスポンスはトークン入りの JSON や空 body のことがあるため、デコードは行わない
+    pub async fn ack_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/channels/{}/messages/{}/ack",
+            API_BASE, channel_id, message_id
+        );
+        let payload = serde_json::json!({ "token": serde_json::Value::Null });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", self.token.clone())
+            .header("User-Agent", "Hakuhyo/1.0")
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to send ack request")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!("Ack failed with status {}: {}", status, text);
+        }
+        Ok(())
+    }
+
     /// Gateway URLを取得
     pub async fn get_gateway_url(&self) -> Result<String> {
         // ユーザーアカウント認証対応: /gateway エンドポイントを使用
