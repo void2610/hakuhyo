@@ -293,6 +293,7 @@ fn render_message_list(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
     let max_offset = total_height.saturating_sub(inner.height as u32) as usize;
     let scroll_offset = app.ui.message_scroll_offset.min(max_offset);
     app.ui.message_scroll_offset = scroll_offset; // 過剰な offset をクランプして書き戻す
+    app.ui.cached_max_scroll_offset = max_offset; // 最古到達判定に使う
 
     // 最新メッセージの底辺 y を求める。offset 0 で inner 下端ぴったり、offset>0 で下に押し下げる
     let mut y_bottom: i32 = inner_bottom + scroll_offset as i32;

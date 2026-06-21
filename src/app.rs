@@ -51,8 +51,11 @@ pub struct UiState {
     pub favorites: HashSet<String>,     // お気に入りチャンネルID
     pub search_mode: bool,               // 検索モードフラグ
     pub search_buffer: String,           // 検索クエリ
-    // メッセージリストのスクロール位置 (最新基準のオフセット件数)
+    // メッセージリストのスクロール位置 (最新基準のオフセット行数)
     pub message_scroll_offset: usize,
+    /// 描画時に計算した scroll_offset の上限 (ui.rs から書き戻し)。
+    /// 最古到達判定 (apply_scroll 時の過去ロード起動) に使う。
+    pub cached_max_scroll_offset: usize,
 }
 
 /// 入力モード
@@ -102,6 +105,7 @@ impl AppState {
                 search_mode: false,
                 search_buffer: String::new(),
                 message_scroll_offset: 0,
+                cached_max_scroll_offset: 0,
             },
             picker: None,
         }
@@ -390,8 +394,8 @@ impl AppState {
             AppEvent::ScrollMessages(delta) => {
                 self.apply_scroll(delta);
                 if delta > 0 {
-                    // 上方向 (古い側) スクロール時、必要なら追加読み込みを起動
-                    self.maybe_load_older_messages()
+                    // 上方向 (古い側) かつ最古到達時のみ追加読み込みを起動
+                    self.maybe_load_older_messages_if_at_top()
                 } else {
                     Command::None
                 }
@@ -484,7 +488,7 @@ impl AppState {
                 }
                 KeyCode::Char('e') => {
                     self.apply_scroll(1);
-                    self.maybe_load_older_messages()
+                    self.maybe_load_older_messages_if_at_top()
                 }
                 KeyCode::Char('d') => {
                     self.apply_scroll(-1);
@@ -614,6 +618,15 @@ impl AppState {
 
         // チャンネル切り替え時に自動的にメッセージを読み込む
         Command::LoadMessages(channel_ids[new_index].clone())
+    }
+
+    /// スクロール位置が直近に描画した上限 (= 最古メッセージが画面に出ている) に
+    /// 達したときだけ過去メッセージ読み込みを起動する。
+    fn maybe_load_older_messages_if_at_top(&mut self) -> Command {
+        if self.ui.message_scroll_offset < self.ui.cached_max_scroll_offset {
+            return Command::None;
+        }
+        self.maybe_load_older_messages()
     }
 
     /// 古い側にスクロールしたとき、必要なら追加メッセージ読み込みを起動する。
